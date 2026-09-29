@@ -54,8 +54,14 @@
     textarea:focus { border-color: #6366f1; }
     textarea::placeholder { color: #383838; }
     .row {
-      display: flex; align-items: center; gap: 12px; margin-top: 12px;
+      display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap;
     }
+    select {
+      background: #0f0f0f; border: 1px solid #252525; border-radius: 8px;
+      color: #e5e5e5; font-size: 0.875rem; padding: 9px 12px;
+      font-family: inherit; outline: none; cursor: pointer;
+    }
+    select:focus { border-color: #6366f1; }
     button {
       background: #6366f1; color: #fff; border: none; border-radius: 8px;
       padding: 9px 22px; font-size: 0.875rem; font-weight: 500;
@@ -72,9 +78,27 @@
       font-size: 0.7rem; font-weight: 600; color: #444;
       text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
     }
+
+    .filters {
+      display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .filter-btn {
+      background: #161616; color: #888; border: 1px solid #222;
+      border-radius: 20px; padding: 6px 14px; font-size: 0.78rem;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .filter-btn:hover { border-color: #333; color: #ccc; }
+    .filter-btn.active { background: #6366f1; border-color: #6366f1; color: #fff; }
+
     .thought {
       background: #161616; border: 1px solid #1e1e1e; border-radius: 10px;
       padding: 16px 18px; margin-bottom: 8px;
+    }
+    .thought-category {
+      display: inline-block; font-size: 0.68rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.05em;
+      color: #a5a6f6; background: #1c1c2e; border-radius: 4px;
+      padding: 2px 8px; margin-bottom: 8px;
     }
     .thought-text { font-size: 0.9rem; color: #ccc; line-height: 1.55; white-space: pre-wrap; }
     .thought-time { font-size: 0.72rem; color: #444; margin-top: 8px; }
@@ -97,6 +121,12 @@
   <div class="capture">
     <textarea id="input" placeholder="Capture anything — ideas, notes, things you learned, questions, plans..." rows="4"></textarea>
     <div class="row">
+      <select id="category">
+        <option value="general">General</option>
+        <option value="business">Business</option>
+        <option value="ideas">Ideas</option>
+        <option value="personal">Personal</option>
+      </select>
       <button id="saveBtn" onclick="save()" disabled>Save to Brain</button>
       <span class="hint">or Ctrl+Enter</span>
       <span class="save-msg" id="saveMsg"></span>
@@ -104,11 +134,20 @@
   </div>
 
   <div class="section-label">Recent Thoughts</div>
+  <div class="filters" id="filters">
+    <button class="filter-btn active" data-cat="all" onclick="setFilter('all')">All</button>
+    <button class="filter-btn" data-cat="general" onclick="setFilter('general')">General</button>
+    <button class="filter-btn" data-cat="business" onclick="setFilter('business')">Business</button>
+    <button class="filter-btn" data-cat="ideas" onclick="setFilter('ideas')">Ideas</button>
+    <button class="filter-btn" data-cat="personal" onclick="setFilter('personal')">Personal</button>
+  </div>
   <div id="list"><div class="empty">Loading...</div></div>
 
 </div>
 <script>
   let db = null
+  let allThoughts = []
+  let activeFilter = 'all'
 
   function showBanner(html) {
     const b = document.getElementById('banner')
@@ -142,6 +181,7 @@
     const input = document.getElementById('input')
     const text = input.value.trim()
     if (!text) return
+    const category = document.getElementById('category').value
     const btn = document.getElementById('saveBtn')
     const msg = document.getElementById('saveMsg')
     btn.disabled = true
@@ -149,7 +189,7 @@
     msg.textContent = ''
     msg.className = 'save-msg'
     try {
-      const { error } = await db.from('thoughts').insert({ content: text })
+      const { error } = await db.from('thoughts').insert({ content: text, category })
       if (error) throw error
       input.value = ''
       msg.textContent = '✓ Saved'
@@ -164,25 +204,42 @@
     }
   }
 
+  function setFilter(cat) {
+    activeFilter = cat
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.cat === cat)
+    })
+    render()
+  }
+
   async function load() {
-    const list = document.getElementById('list')
     try {
       const { data, error } = await db
         .from('thoughts').select('*')
-        .order('created_at', { ascending: false }).limit(20)
+        .order('created_at', { ascending: false }).limit(100)
       if (error) throw error
-      if (!data || data.length === 0) {
-        list.innerHTML = '<div class="empty">No thoughts yet. Write something above.</div>'
-        return
-      }
-      list.innerHTML = data.map(t => `
-        <div class="thought">
-          <div class="thought-text">${esc(t.content)}</div>
-          <div class="thought-time">${fmt(t.created_at)}</div>
-        </div>`).join('')
+      allThoughts = data || []
+      render()
     } catch (e) {
-      list.innerHTML = '<div class="empty" style="color:#ef4444">Could not load: ' + e.message + '</div>'
+      document.getElementById('list').innerHTML = '<div class="empty" style="color:#ef4444">Could not load: ' + e.message + '</div>'
     }
+  }
+
+  function render() {
+    const list = document.getElementById('list')
+    const data = activeFilter === 'all'
+      ? allThoughts
+      : allThoughts.filter(t => (t.category || 'general') === activeFilter)
+    if (!data || data.length === 0) {
+      list.innerHTML = '<div class="empty">No thoughts yet' + (activeFilter !== 'all' ? ' in this category' : '') + '.</div>'
+      return
+    }
+    list.innerHTML = data.map(t => `
+      <div class="thought">
+        <div class="thought-category">${esc(t.category || 'general')}</div>
+        <div class="thought-text">${esc(t.content)}</div>
+        <div class="thought-time">${fmt(t.created_at)}</div>
+      </div>`).join('')
   }
 
   document.getElementById('input').addEventListener('keydown', e => {
