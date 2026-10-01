@@ -79,6 +79,16 @@
       text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
     }
 
+    .search-row { margin-bottom: 12px; }
+    .search-input {
+      width: 100%; background: #161616; border: 1px solid #222;
+      border-radius: 8px; color: #e5e5e5; font-size: 0.875rem;
+      padding: 10px 14px; font-family: inherit; outline: none;
+      transition: border-color 0.2s;
+    }
+    .search-input:focus { border-color: #6366f1; }
+    .search-input::placeholder { color: #444; }
+
     .filters {
       display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;
     }
@@ -94,15 +104,38 @@
       background: #161616; border: 1px solid #1e1e1e; border-radius: 10px;
       padding: 16px 18px; margin-bottom: 8px;
     }
+    .thought-top {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+    }
     .thought-category {
       display: inline-block; font-size: 0.68rem; font-weight: 600;
       text-transform: uppercase; letter-spacing: 0.05em;
       color: #a5a6f6; background: #1c1c2e; border-radius: 4px;
       padding: 2px 8px; margin-bottom: 8px;
     }
+    .thought-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .icon-btn {
+      background: transparent; border: none; color: #444;
+      font-size: 0.78rem; padding: 2px 6px; cursor: pointer;
+      border-radius: 4px; transition: color 0.15s, background 0.15s;
+    }
+    .icon-btn:hover:not(:disabled) { color: #ccc; background: #222; }
+    .icon-btn.danger:hover:not(:disabled) { color: #f87171; background: #2a1010; }
     .thought-text { font-size: 0.9rem; color: #ccc; line-height: 1.55; white-space: pre-wrap; }
     .thought-time { font-size: 0.72rem; color: #444; margin-top: 8px; }
     .empty { color: #333; font-size: 0.875rem; text-align: center; padding: 48px 0; }
+
+    .edit-textarea {
+      width: 100%; background: #0f0f0f; border: 1px solid #6366f1;
+      border-radius: 8px; color: #e5e5e5; font-size: 0.9rem;
+      padding: 10px 12px; resize: vertical; min-height: 70px;
+      font-family: inherit; outline: none; line-height: 1.5;
+    }
+    .edit-row { display: flex; gap: 8px; margin-top: 10px; }
+    .edit-row button { padding: 6px 16px; font-size: 0.8rem; }
+    .btn-cancel { background: #1e1e1e; color: #999; }
+    .btn-cancel:hover { background: #262626; }
+    mark { background: #3b3a1a; color: #fde68a; border-radius: 2px; }
   </style>
 </head>
 <body>
@@ -134,6 +167,11 @@
   </div>
 
   <div class="section-label">Recent Thoughts</div>
+
+  <div class="search-row">
+    <input class="search-input" id="searchInput" type="text" placeholder="Search your thoughts...">
+  </div>
+
   <div class="filters" id="filters">
     <button class="filter-btn active" data-cat="all" onclick="setFilter('all')">All</button>
     <button class="filter-btn" data-cat="general" onclick="setFilter('general')">General</button>
@@ -148,6 +186,8 @@
   let db = null
   let allThoughts = []
   let activeFilter = 'all'
+  let searchTerm = ''
+  let editingId = null
 
   function showBanner(html) {
     const b = document.getElementById('banner')
@@ -212,11 +252,16 @@
     render()
   }
 
+  document.getElementById('searchInput').addEventListener('input', e => {
+    searchTerm = e.target.value.trim().toLowerCase()
+    render()
+  })
+
   async function load() {
     try {
       const { data, error } = await db
         .from('thoughts').select('*')
-        .order('created_at', { ascending: false }).limit(100)
+        .order('created_at', { ascending: false }).limit(200)
       if (error) throw error
       allThoughts = data || []
       render()
@@ -225,21 +270,86 @@
     }
   }
 
-  function render() {
-    const list = document.getElementById('list')
-    const data = activeFilter === 'all'
+  function getFiltered() {
+    let data = activeFilter === 'all'
       ? allThoughts
       : allThoughts.filter(t => (t.category || 'general') === activeFilter)
+    if (searchTerm) {
+      data = data.filter(t => t.content.toLowerCase().includes(searchTerm))
+    }
+    return data
+  }
+
+  function render() {
+    const list = document.getElementById('list')
+    const data = getFiltered()
     if (!data || data.length === 0) {
-      list.innerHTML = '<div class="empty">No thoughts yet' + (activeFilter !== 'all' ? ' in this category' : '') + '.</div>'
+      const reason = searchTerm ? ' matching "' + esc(searchTerm) + '"' : (activeFilter !== 'all' ? ' in this category' : '')
+      list.innerHTML = '<div class="empty">No thoughts yet' + reason + '.</div>'
       return
     }
-    list.innerHTML = data.map(t => `
+    list.innerHTML = data.map(t => {
+      if (editingId === t.id) {
+        return `
+        <div class="thought">
+          <div class="thought-category">${esc(t.category || 'general')}</div>
+          <textarea class="edit-textarea" id="edit-${t.id}">${esc(t.content)}</textarea>
+          <div class="edit-row">
+            <button onclick="saveEdit('${t.id}')">Save</button>
+            <button class="btn-cancel" onclick="cancelEdit()">Cancel</button>
+          </div>
+        </div>`
+      }
+      return `
       <div class="thought">
-        <div class="thought-category">${esc(t.category || 'general')}</div>
-        <div class="thought-text">${esc(t.content)}</div>
+        <div class="thought-top">
+          <div class="thought-category">${esc(t.category || 'general')}</div>
+          <div class="thought-actions">
+            <button class="icon-btn" onclick="startEdit('${t.id}')">Edit</button>
+            <button class="icon-btn danger" onclick="deleteThought('${t.id}')">Delete</button>
+          </div>
+        </div>
+        <div class="thought-text">${highlight(esc(t.content))}</div>
         <div class="thought-time">${fmt(t.created_at)}</div>
-      </div>`).join('')
+      </div>`
+    }).join('')
+  }
+
+  function startEdit(id) {
+    editingId = id
+    render()
+    const ta = document.getElementById('edit-' + id)
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length) }
+  }
+
+  function cancelEdit() {
+    editingId = null
+    render()
+  }
+
+  async function saveEdit(id) {
+    const ta = document.getElementById('edit-' + id)
+    const newText = ta.value.trim()
+    if (!newText) return
+    try {
+      const { error } = await db.from('thoughts').update({ content: newText }).eq('id', id)
+      if (error) throw error
+      editingId = null
+      await load()
+    } catch (e) {
+      alert('Could not save edit: ' + e.message)
+    }
+  }
+
+  async function deleteThought(id) {
+    if (!confirm('Delete this thought? This cannot be undone.')) return
+    try {
+      const { error } = await db.from('thoughts').delete().eq('id', id)
+      if (error) throw error
+      await load()
+    } catch (e) {
+      alert('Could not delete: ' + e.message)
+    }
   }
 
   document.getElementById('input').addEventListener('keydown', e => {
@@ -248,6 +358,11 @@
 
   function esc(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  }
+  function highlight(escapedText) {
+    if (!searchTerm) return escapedText
+    const safe = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return escapedText.replace(new RegExp('(' + safe + ')', 'ig'), '<mark>$1</mark>')
   }
   function fmt(iso) {
     return new Date(iso).toLocaleString('en-US', {
