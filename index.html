@@ -294,7 +294,7 @@
 
 <script>
 // ===== CONFIG / CLIENT =====
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 let currentUser = null;
 
 // ===== ENTITY DECODER =====
@@ -342,10 +342,10 @@ authSubmitBtn.addEventListener('click', async () => {
   authSubmitBtn.disabled = true;
   try {
     if (authMode === 'signin') {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
       if (error) throw error;
     } else {
-      const { error } = await supabase.auth.signUp({ email, password });
+      const { error } = await supabaseClient.auth.signUp({ email, password });
       if (error) throw error;
     }
   } catch (err) {
@@ -355,10 +355,10 @@ authSubmitBtn.addEventListener('click', async () => {
 });
 
 document.getElementById('signOutBtn').addEventListener('click', async () => {
-  await supabase.auth.signOut();
+  await supabaseClient.auth.signOut();
 });
 
-supabase.auth.onAuthStateChange((event, session) => {
+supabaseClient.auth.onAuthStateChange((event, session) => {
   currentUser = session?.user || null;
   if (currentUser) {
     document.getElementById('authScreen').style.display = 'none';
@@ -376,7 +376,7 @@ supabase.auth.onAuthStateChange((event, session) => {
 async function checkConnection() {
   const dot = document.getElementById('statusDot');
   try {
-    const { error } = await supabase.from('thoughts').select('id').limit(1);
+    const { error } = await supabaseClient.from('thoughts').select('id').limit(1);
     dot.className = 'dot ' + (error && error.code !== 'PGRST116' && error.message && !error.message.includes('JWT') ? 'disconnected' : 'connected');
     if (!error) dot.classList.add('connected');
   } catch {
@@ -398,7 +398,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ===== SAVE HELPER =====
 async function saveThought(content, metadata = {}) {
-  const { data, error } = await supabase.from('thoughts').insert({
+  const { data, error } = await supabaseClient.from('thoughts').insert({
     content,
     user_id: currentUser.id,
     metadata
@@ -409,7 +409,7 @@ async function saveThought(content, metadata = {}) {
 
 async function saveSource(thoughtId, sourceText, sourceKind) {
   try {
-    await supabase.from('thought_sources').insert({
+    await supabaseClient.from('thought_sources').insert({
       thought_id: thoughtId,
       user_id: currentUser.id,
       source_text: sourceText,
@@ -623,7 +623,7 @@ async function doSearch() {
   const resultsEl = document.getElementById('searchResults');
   if (!query) return;
   resultsEl.innerHTML = '<p class="muted">Searching...</p>';
-  const { data, error } = await supabase
+  const { data, error } = await supabaseClient
     .from('thoughts')
     .select('*')
     .ilike('content', `%${query}%`)
@@ -636,7 +636,7 @@ async function doSearch() {
 async function loadRecent() {
   const resultsEl = document.getElementById('recentResults');
   resultsEl.innerHTML = '<p class="muted">Loading...</p>';
-  const { data, error } = await supabase
+  const { data, error } = await supabaseClient
     .from('thoughts')
     .select('*')
     .order('created_at', { ascending: false })
