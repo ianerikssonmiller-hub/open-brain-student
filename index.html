@@ -249,7 +249,9 @@
     <section class="panel" id="panel-youtube">
       <div class="card">
         <input type="url" id="ytUrl" placeholder="Paste a YouTube video URL">
-        <button class="secondary" id="ytLoadBtn">Load Video</button>
+        <button class="primary" id="ytAutoBtn">⚡ Capture automatically</button>
+        <p class="muted" id="ytStatus" style="margin:10px 0;"></p>
+        <button class="secondary" id="ytLoadBtn">Or paste the transcript by hand</button>
         <div id="ytPreview"></div>
       </div>
     </section>
@@ -269,9 +271,10 @@
     <section class="panel" id="panel-url">
       <div class="card">
         <input type="url" id="urlInput" placeholder="https://example.com/article">
-        <p class="muted" style="margin-bottom:10px;">Browsers won't let a web page fetch another site's article automatically — paste the article text below.</p>
-        <textarea id="urlText" rows="6" placeholder="Paste the article text here..."></textarea>
+        <p class="muted" style="margin-bottom:10px;">Just paste the link and hit Save — your server fetches the article for you. If a site blocks that, paste the article text below and save again.</p>
+        <textarea id="urlText" rows="6" placeholder="Optional: paste the article text here..."></textarea>
         <button class="primary" id="saveUrlBtn">Save to Brain</button>
+        <p class="muted" id="urlStatus" style="margin-top:10px;"></p>
       </div>
     </section>
 
@@ -483,7 +486,40 @@ document.getElementById('saveVoiceBtn').addEventListener('click', async () => {
   }
 });
 
+// ===== SERVER CAPTURE (Level 3) =====
+// Calls one of your edge functions with your login token attached, so the
+// function knows whose brain to save into.
+async function callCaptureFunction(name, url) {
+  try {
+    const { data, error } = await supabaseClient.functions.invoke(name, { body: { url } });
+    if (error) return { ok: false, error: 'Could not reach the ' + name + ' function: ' + error.message };
+    return data;
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 // ===== YOUTUBE =====
+document.getElementById('ytAutoBtn').addEventListener('click', async () => {
+  const url = document.getElementById('ytUrl').value.trim();
+  const status = document.getElementById('ytStatus');
+  if (!extractYouTubeId(url)) { status.textContent = "That doesn't look like a YouTube URL."; return; }
+  const btn = document.getElementById('ytAutoBtn');
+  btn.disabled = true;
+  status.textContent = 'Fetching the transcript… this can take up to 30 seconds.';
+  const result = await callCaptureFunction('capture-youtube', url);
+  btn.disabled = false;
+  if (result.ok) {
+    status.textContent = result.has_transcript
+      ? `Saved "${result.title}" — full transcript (${result.chars.toLocaleString()} characters).`
+      : `Saved "${result.title}" — no transcript was available, so the video description was saved instead.`;
+    document.getElementById('ytUrl').value = '';
+    document.getElementById('ytPreview').innerHTML = '';
+  } else {
+    status.textContent = result.error;
+  }
+});
+
 function extractYouTubeId(url) {
   const m = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
@@ -599,7 +635,22 @@ savePdfBtn.addEventListener('click', async () => {
 document.getElementById('saveUrlBtn').addEventListener('click', async () => {
   const url = document.getElementById('urlInput').value.trim();
   const text = decodeEntities(document.getElementById('urlText').value.trim());
-  if (!url || !text) return alert('Add the URL and paste the article text.');
+  const status = document.getElementById('urlStatus');
+  if (!url) return alert('Add the URL first.');
+
+  // No pasted text: let the capture-url server function fetch the article
+  if (!text) {
+    status.textContent = 'Fetching the article…';
+    const result = await callCaptureFunction('capture-url', url);
+    if (result.ok) {
+      status.textContent = `Saved "${result.title}" (${result.chars.toLocaleString()} characters).`;
+      document.getElementById('urlInput').value = '';
+    } else {
+      status.textContent = result.error + ' You can paste the text above and save again.';
+    }
+    return;
+  }
+
   try {
     const thought = await saveThought(`🔗 URL: ${url}\n\n${text}`, { url });
     await saveSource(thought.id, text, 'web');
