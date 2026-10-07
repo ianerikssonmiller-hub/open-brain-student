@@ -97,13 +97,16 @@ async function fromSupadata(videoUrl: string): Promise<VideoContent | null> {
 // web page would give us nothing.
 async function fromInnertube(videoId: string): Promise<VideoContent | null> {
   const clients = [
+    // YouTube rejects app versions it considers too old ("Precondition check
+    // failed"). If this route stops working, bumping these version numbers to
+    // a current release of the YouTube app is usually the fix.
     {
       name: 'IOS',
-      userAgent: 'com.google.ios.youtube/19.29.1 (iPhone; CPU iPhone OS 18_0 like Mac OS X)',
+      userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
       context: {
-        clientName: 'IOS', clientVersion: '19.29.1',
-        deviceMake: 'Apple', deviceModel: 'iPhone17,2',
-        osName: 'iPhone', osVersion: '18.1.0.22B83', hl: 'en', gl: 'US',
+        clientName: 'IOS', clientVersion: '20.10.4',
+        deviceMake: 'Apple', deviceModel: 'iPhone16,2',
+        osName: 'iPhone', osVersion: '18.3.2.22D82', hl: 'en', gl: 'US',
       },
     },
     {
@@ -167,7 +170,8 @@ async function fromInnertube(videoId: string): Promise<VideoContent | null> {
         const xml = await capRes.text()
         // Caption XML looks like: <text start="1.2" dur="3.4">words here</text>
         const transcript = [...xml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)]
-          .map((m) => decodeEntities(m[1]))
+          // Caption text arrives escaped twice ("&amp;#39;"), so decode twice
+          .map((m) => decodeEntities(decodeEntities(m[1])))
           .join(' ')
           .replace(/\s+/g, ' ')
           .trim()
