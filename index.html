@@ -192,7 +192,10 @@
       padding: 14px;
       margin-bottom: 10px;
     }
-    .thought-meta { font-size: 11px; color: #737373; margin-bottom: 6px; }
+    .thought-meta { font-size: 11px; color: #737373; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .private-badge { color: #fbbf24; font-weight: 600; }
+    .privacy-btn { margin-left: auto; background: none; border: 1px solid #2a2a2a; color: #a3a3a3; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+    .privacy-btn:hover { border-color: #6366f1; color: #e5e5e5; }
     .thought-content { font-size: 14px; white-space: pre-wrap; word-break: break-word; }
     .badge {
       display: inline-block;
@@ -701,11 +704,39 @@ function renderThoughts(data, el) {
   if (!data || !data.length) { el.innerHTML = '<p class="muted">Nothing here yet.</p>'; return; }
   el.innerHTML = data.map(t => `
     <div class="thought-card">
-      <div class="thought-meta">${new Date(t.created_at).toLocaleString()}</div>
+      <div class="thought-meta">
+        <span>${new Date(t.created_at).toLocaleString()}</span>
+        ${t.is_private ? '<span class="private-badge">🔒 Private</span>' : ''}
+        <button class="privacy-btn" data-id="${t.id}" data-private="${t.is_private ? '1' : ''}">
+          ${t.is_private ? '🔓 Make public' : '🔒 Make private'}
+        </button>
+      </div>
       <div class="thought-content">${escapeHtml(t.content)}</div>
     </div>
   `).join('');
 }
+
+// ===== PRIVATE FLAG =====
+// Private thoughts stay visible to you here, but are hidden from the Telegram
+// bot and from the Claude connection you build in Level 4.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.privacy-btn');
+  if (!btn) return;
+  const makePrivate = !btn.dataset.private;
+  btn.disabled = true;
+  const { error } = await supabaseClient
+    .from('thoughts')
+    .update({ is_private: makePrivate })
+    .eq('id', btn.dataset.id);
+  btn.disabled = false;
+  if (error) return alert('Could not update: ' + error.message);
+  btn.dataset.private = makePrivate ? '1' : '';
+  btn.textContent = makePrivate ? '🔓 Make public' : '🔒 Make private';
+  const meta = btn.closest('.thought-meta');
+  const badge = meta.querySelector('.private-badge');
+  if (makePrivate && !badge) btn.insertAdjacentHTML('beforebegin', '<span class="private-badge">🔒 Private</span>');
+  if (!makePrivate && badge) badge.remove();
+});
 
 function escapeHtml(str) {
   const d = document.createElement('div');

@@ -5,7 +5,12 @@
 //   /search <words>  or  ? <words>  -> search your thoughts, reply with top 5
 //   /recent                          -> reply with your last 5 thoughts
 //   /start                           -> say hello
+//   /private <text>                  -> save it as a PRIVATE thought
 //   anything else                    -> save it as a new thought
+//
+// Private thoughts never come back in /search or /recent here — they are kept
+// out of every outside service that reads your brain (this bot, and Claude
+// from Level 4). Note: Telegram itself still sees what you type to the bot.
 //
 // Secrets it reads (set in Supabase -> Edge Functions -> Secrets):
 //   TELEGRAM_BOT_TOKEN   your bot's password from BotFather
@@ -71,6 +76,7 @@ async function searchThoughts(chatId: number, query: string) {
     .from('thoughts')
     .select('content, created_at')
     .eq('user_id', OWNER_USER_ID)
+    .eq('is_private', false)
     .ilike('content', `%${escaped}%`)
     .order('created_at', { ascending: false })
     .limit(5)
@@ -87,6 +93,7 @@ async function recentThoughts(chatId: number) {
     .from('thoughts')
     .select('content, created_at')
     .eq('user_id', OWNER_USER_ID)
+    .eq('is_private', false)
     .order('created_at', { ascending: false })
     .limit(5)
   if (error) throw error
@@ -97,14 +104,19 @@ async function recentThoughts(chatId: number) {
   await reply(chatId, `🕒 Your last ${data.length} thoughts:\n\n${formatThoughts(data)}`)
 }
 
-async function saveThought(chatId: number, text: string) {
+async function saveThought(chatId: number, text: string, isPrivate = false) {
+  if (!text) {
+    await reply(chatId, 'Nothing to save. Try: /private my note here')
+    return
+  }
   const { error } = await admin.from('thoughts').insert({
     content: text,
     user_id: OWNER_USER_ID,
+    is_private: isPrivate,
     metadata: { source: 'telegram' },
   })
   if (error) throw error
-  await reply(chatId, '🧠 Saved to your brain')
+  await reply(chatId, isPrivate ? '🔒 Saved privately to your brain' : '🧠 Saved to your brain')
 }
 
 Deno.serve(async (req) => {
@@ -140,7 +152,7 @@ Deno.serve(async (req) => {
     if (lower === '/start') {
       await reply(
         chatId,
-        "👋 I'm your Open Brain.\n\n• Send any message and I'll save it\n• /search <words> (or ? <words>) to search\n• /recent to see your last 5 thoughts",
+        "👋 I'm your Open Brain.\n\n• Send any message and I'll save it\n• /private <text> to save it privately\n• /search <words> (or ? <words>) to search\n• /recent to see your last 5 thoughts",
       )
     } else if (lower.startsWith('/search')) {
       await searchThoughts(chatId, text.slice('/search'.length).trim())
@@ -148,6 +160,8 @@ Deno.serve(async (req) => {
       await searchThoughts(chatId, text.slice(1).trim())
     } else if (lower.startsWith('/recent')) {
       await recentThoughts(chatId)
+    } else if (lower.startsWith('/private')) {
+      await saveThought(chatId, text.slice('/private'.length).trim(), true)
     } else {
       await saveThought(chatId, text)
     }
