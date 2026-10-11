@@ -14,6 +14,7 @@
 
 import { htmlToText } from '../_shared/html-extract.ts'
 import { corsHeaders, getCaller, jsonResponse, saveCapture } from '../_shared/capture-common.ts'
+import { callerAddress, securityAlert } from '../_shared/security.ts'
 
 const MAX_BYTES = 3_000_000 // don't try to swallow a 50MB page
 
@@ -25,7 +26,11 @@ Deno.serve(async (req) => {
     const body = await req.json()
     const { url, is_private } = body
     const user = await getCaller(req, body)
-    if (!user) return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
+    if (!user) {
+      const address = callerAddress(req)
+      await securityAlert('capture_unauthorized', { function: 'capture-url', address }, { dedupKey: address, windowMinutes: 60 })
+      return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
+    }
     if (!url || typeof url !== 'string') {
       return jsonResponse({ ok: false, error: 'A link is required' })
     }

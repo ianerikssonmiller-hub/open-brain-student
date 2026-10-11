@@ -27,6 +27,7 @@
 // ============================================================================
 
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { callerAddress, securityAlert } from '../_shared/security.ts'
 
 const MCP_ACCESS_KEY = Deno.env.get('MCP_ACCESS_KEY') ?? ''
 const OWNER_USER_ID = Deno.env.get('OWNER_USER_ID') ?? ''
@@ -417,7 +418,14 @@ Deno.serve(async (req) => {
     return json({ error: 'Server not configured: MCP_ACCESS_KEY or OWNER_USER_ID secret is missing' }, 500)
   }
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '')
-  if (!safeEqual(token, MCP_ACCESS_KEY)) return json({ error: 'Unauthorized' }, 401)
+  const address = callerAddress(req)
+  if (!safeEqual(token, MCP_ACCESS_KEY)) {
+    // Alert at most once an hour per address
+    await securityAlert('mcp_bad_key', { address }, { dedupKey: address, windowMinutes: 60 })
+    return json({ error: 'Unauthorized' }, 401)
+  }
+  // Right key from an address we haven't seen in 30 days: tell you about it
+  await securityAlert('mcp_new_address', { address }, { dedupKey: address, windowMinutes: 60 * 24 * 30 })
 
   let body: unknown
   try {

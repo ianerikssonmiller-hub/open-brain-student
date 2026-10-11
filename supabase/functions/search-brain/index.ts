@@ -19,6 +19,7 @@
 // ============================================================================
 
 import { admin, corsHeaders, getCaller, jsonResponse } from '../_shared/capture-common.ts'
+import { callerAddress, securityAlert } from '../_shared/security.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? ''
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -82,7 +83,11 @@ Deno.serve(async (req) => {
 
   try {
     const user = await getCaller(req)
-    if (!user) return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
+    if (!user) {
+      const address = callerAddress(req)
+      await securityAlert('capture_unauthorized', { function: 'search-brain', address }, { dedupKey: address, windowMinutes: 60 })
+      return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
+    }
 
     const { query, limit } = await req.json()
     const text = String(query ?? '').trim()

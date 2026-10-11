@@ -21,6 +21,7 @@
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { securityAlert } from '../_shared/security.ts'
 
 const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? ''
 const OWNER_USER_ID = Deno.env.get('OWNER_USER_ID') ?? ''
@@ -199,7 +200,17 @@ Deno.serve(async (req) => {
       )
       return ok()
     }
-    if (String(chatId) !== ALLOWED_CHAT_ID) return ok() // a stranger — stay silent
+    if (String(chatId) !== ALLOWED_CHAT_ID) {
+      // A stranger — stay silent to them, but tell you (once a day per stranger)
+      const from = message?.from ?? {}
+      await securityAlert('telegram_stranger', {
+        chat_id: chatId,
+        name: [from.first_name, from.last_name].filter(Boolean).join(' '),
+        username: from.username ? '@' + from.username : '',
+        message: text.slice(0, 80),
+      }, { dedupKey: String(chatId), windowMinutes: 60 * 24 })
+      return ok()
+    }
 
     if (!OWNER_USER_ID) {
       await reply(chatId, 'Setup problem: the OWNER_USER_ID secret is missing in Supabase.')

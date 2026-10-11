@@ -22,6 +22,7 @@
 // ============================================================================
 
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { callerAddress, securityAlert } from '../_shared/security.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? ''
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -61,6 +62,8 @@ function safeEqual(a: string, b: string) {
 Deno.serve(async (req) => {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405)
   if (!DIGEST_SECRET || !safeEqual(req.headers.get('x-digest-secret') ?? '', DIGEST_SECRET)) {
+    const address = callerAddress(req)
+    await securityAlert('digest_bad_secret', { address }, { dedupKey: address, windowMinutes: 60 })
     return json({ error: 'Unauthorized' }, 401)
   }
 
