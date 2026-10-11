@@ -21,10 +21,11 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders })
 
   try {
-    const user = await getCaller(req)
-    if (!user) return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
 
-    const { url, is_private } = await req.json()
+    const body = await req.json()
+    const { url, is_private } = body
+    const user = await getCaller(req, body)
+    if (!user) return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
     if (!url || typeof url !== 'string') {
       return jsonResponse({ ok: false, error: 'A link is required' })
     }

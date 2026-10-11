@@ -6,6 +6,7 @@
 //   /recent                          -> reply with your last 5 thoughts
 //   /start                           -> say hello
 //   /private <text>                  -> save it as a PRIVATE thought
+//   a YouTube or article link        -> capture the full transcript/article
 //   anything else                    -> save it as a new thought
 //
 // Private thoughts never come back in /search or /recent here — they are kept
@@ -122,6 +123,60 @@ async function saveThought(chatId: number, text: string, isPrivate = false) {
   await reply(chatId, isPrivate ? '🔒 Saved privately to your brain' : '🧠 Saved to your brain')
 }
 
+// ---------------------------------------------------------------------------
+// LINKS — send the bot a YouTube or article link and it captures the full
+// transcript / article automatically, using the same capture functions as
+// the app's ⚡ buttons. Works with /private too.
+// ---------------------------------------------------------------------------
+const LINK_ONLY = /^https?:\/\/\S+$/i
+const YOUTUBE = /(youtube\.com\/(watch|shorts|embed)|youtu\.be\/)/i
+
+async function captureLink(chatId: number, url: string, isPrivate: boolean) {
+  const isYouTube = YOUTUBE.test(url)
+  await reply(chatId, isYouTube ? '⏳ Grabbing the transcript…' : '⏳ Reading the article…')
+  try {
+    const res = await fetch(
+      `${Deno.env.get('SUPABASE_URL')}/functions/v1/${isYouTube ? 'capture-youtube' : 'capture-url'}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+        },
+        body: JSON.stringify({ url, user_id: OWNER_USER_ID, is_private: isPrivate }),
+      },
+    )
+    const result = await res.json()
+    if (!result.ok) {
+      // Couldn't fetch it — keep the link so nothing is lost
+      await saveThought(chatId, url, isPrivate)
+      await reply(chatId, `⚠️ Couldn't fetch the content (${result.error ?? res.status}). I saved the link instead.`)
+      return
+    }
+    const lock = isPrivate ? '🔒 ' : ''
+    if (isYouTube) {
+      await reply(chatId, result.has_transcript
+        ? `${lock}📹 Saved "${result.title}" — full transcript (${result.chars.toLocaleString()} characters)`
+        : `${lock}📹 Saved "${result.title}" — no transcript available, saved the video description instead`)
+    } else {
+      await reply(chatId, `${lock}🔗 Saved "${result.title}" (${result.chars.toLocaleString()} characters)`)
+    }
+  } catch (err) {
+    console.error('captureLink error:', err)
+    await saveThought(chatId, url, isPrivate)
+    await reply(chatId, "⚠️ Something went wrong fetching that link. I saved the link instead.")
+  }
+}
+
+// Capturing can take up to ~30 seconds, longer than Telegram likes to wait,
+// so it finishes in the background after we've answered Telegram.
+function inBackground(work: Promise<unknown>) {
+  // deno-lint-ignore no-explicit-any
+  const runtime = (globalThis as any).EdgeRuntime
+  if (runtime?.waitUntil) runtime.waitUntil(work)
+  return runtime?.waitUntil ? Promise.resolve() : work
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return ok()
@@ -155,7 +210,7 @@ Deno.serve(async (req) => {
     if (lower === '/start') {
       await reply(
         chatId,
-        "👋 I'm your Open Brain.\n\n• Send any message and I'll save it\n• /private <text> to save it privately\n• /search <words> (or ? <words>) to search\n• /recent to see your last 5 thoughts",
+        "👋 I'm your Open Brain.\n\n• Send any message and I'll save it\n• Send a YouTube or article link and I'll capture the whole thing\n• /private <text or link> to save it privately\n• /search <words> (or ? <words>) to search\n• /recent to see your last 5 thoughts",
       )
     } else if (lower.startsWith('/search')) {
       await searchThoughts(chatId, text.slice('/search'.length).trim())
@@ -164,7 +219,11 @@ Deno.serve(async (req) => {
     } else if (lower.startsWith('/recent')) {
       await recentThoughts(chatId)
     } else if (lower.startsWith('/private')) {
-      await saveThought(chatId, text.slice('/private'.length).trim(), true)
+      const rest = text.slice('/private'.length).trim()
+      if (LINK_ONLY.test(rest)) await inBackground(captureLink(chatId, rest, true))
+      else await saveThought(chatId, rest, true)
+    } else if (LINK_ONLY.test(text)) {
+      await inBackground(captureLink(chatId, text, false))
     } else {
       await saveThought(chatId, text)
     }

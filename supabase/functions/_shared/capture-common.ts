@@ -30,12 +30,31 @@ export const admin = createClient(
 
 // Who is asking? Read from their login token — never from the request body,
 // or anyone could write into anyone else's brain.
-export async function getCaller(req: Request) {
+//
+// One exception: your own server functions (like the Telegram bot) call these
+// capture functions with the service role key and say which user to save for
+// in body.user_id. That's safe because only your functions hold that key —
+// and Supabase's front door (verify_jwt, on for the capture functions) has
+// already verified the token before we read which role it was issued for.
+export async function getCaller(req: Request, body?: { user_id?: unknown }) {
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '')
   if (!token) return null
+  if (isServiceRoleToken(token)) {
+    return typeof body?.user_id === 'string' && body.user_id ? { id: body.user_id } : null
+  }
   const { data, error } = await admin.auth.getUser(token)
   if (error || !data.user) return null
-  return data.user
+  return { id: data.user.id }
+}
+
+function isServiceRoleToken(token: string) {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(part + '='.repeat((4 - (part.length % 4)) % 4)))
+    return claims.role === 'service_role'
+  } catch {
+    return false
+  }
 }
 
 // Same save your Level 2 app does: one thought row, plus the full text in

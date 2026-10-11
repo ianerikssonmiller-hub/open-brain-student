@@ -22,6 +22,20 @@ async function generateEmbedding(
   chunkText: string,
   opts: { userId?: string; source?: string } = {},
 ): Promise<number[] | null> {
+  // Two tries: a long capture means many calls in a row, and a brief
+  // hiccup on one of them shouldn't leave that chunk without an embedding.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const embedding = await embedOnce(chunkText, opts)
+    if (embedding) return embedding
+    await new Promise((r) => setTimeout(r, 1500))
+  }
+  return null
+}
+
+async function embedOnce(
+  chunkText: string,
+  opts: { userId?: string; source?: string },
+): Promise<number[] | null> {
   try {
     const embResponse = await fetch(
       `${Deno.env.get('SUPABASE_URL')}/functions/v1/generate-embedding`,
