@@ -2,7 +2,8 @@
 //
 // How it works: Telegram sends every message your bot receives to this
 // function (that's the "webhook"). The function decides what to do with it:
-//   /search <words>  or  ? <words>  -> search your thoughts, reply with top 5
+//   /ask <question>                  -> answer the question from your notes (AI)
+//   /search <words>  or  ? <words>  -> smart search, reply with top 5
 //   /recent                          -> reply with your last 5 thoughts
 //   /start                           -> say hello
 //   /private <text>                  -> save it as a PRIVATE thought
@@ -68,27 +69,114 @@ function formatThoughts(rows: { content: string; created_at: string }[]) {
     .join('\n\n')
 }
 
+// ---------------------------------------------------------------------------
+// SMART SEARCH — the same hybrid search the app and Claude use: meaning +
+// exact keywords + typo-tolerance, matched against chunks of long notes.
+// Private thoughts are excluded. Falls back to keywords if embedding fails.
+// ---------------------------------------------------------------------------
+async function internal(fn: string, body: unknown) {
+  const res = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/${fn}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+    },
+    body: JSON.stringify(body),
+  })
+  return res.json()
+}
+
+interface Hit { id: string; content: string; created_at: string; matched_chunk: string | null }
+
+async function smartSearch(query: string, count: number): Promise<Hit[]> {
+  let embedding: number[] | null = null
+  try {
+    const r = await internal('generate-embedding', { text: query, userId: OWNER_USER_ID, source: 'telegram-search' })
+    embedding = Array.isArray(r.embedding) ? r.embedding : null
+  } catch { /* keyword-only search still works */ }
+  const { data, error } = await admin.rpc('search_thoughts', {
+    query_text: query,
+    p_user_id: OWNER_USER_ID,
+    query_embedding: embedding,
+    match_count: count,
+    max_per_document: 2,
+  })
+  if (error) throw error
+  const hits = (data ?? []) as Hit[]
+  // Long notes: use their best-matching chunk instead of the opening
+  await Promise.all(hits.map(async (h) => {
+    if (h.matched_chunk || h.content.length <= 2000) return
+    const { data: chunk } = await admin.rpc('best_chunk_for', {
+      p_thought_id: h.id, query_text: query, query_embedding: embedding,
+    })
+    if (typeof chunk === 'string' && chunk) h.matched_chunk = chunk
+  }))
+  return hits
+}
+
+// A note's title line + the passage that matched (kept short)
+function passage(h: Hit, max: number) {
+  const title = h.content.split('\n')[0].slice(0, 100)
+  const body = (h.matched_chunk ?? h.content).replace(/\s+/g, ' ').trim()
+  return { title, text: body.length > max ? body.slice(0, max) + '…' : body }
+}
+
 async function searchThoughts(chatId: number, query: string) {
   if (!query) {
-    await reply(chatId, 'What should I search for? Try: /search grill')
+    await reply(chatId, 'What should I search for? Try: ? pricing')
     return
   }
-  // % and _ are wildcards in ilike — escape them so they match literally.
-  const escaped = query.replace(/[\\%_]/g, (c) => '\\' + c)
-  const { data, error } = await admin
-    .from('thoughts')
-    .select('content, created_at')
-    .eq('user_id', OWNER_USER_ID)
-    .eq('is_private', false)
-    .ilike('content', `%${escaped}%`)
-    .order('created_at', { ascending: false })
-    .limit(5)
-  if (error) throw error
-  if (!data || data.length === 0) {
+  const hits = await smartSearch(query, 5)
+  if (!hits.length) {
     await reply(chatId, `Nothing in your brain matches "${query}".`)
     return
   }
-  await reply(chatId, `🔎 Results for "${query}":\n\n${formatThoughts(data)}`)
+  const lines = hits.map((h, i) => {
+    const p = passage(h, 280)
+    const date = new Date(h.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    return `${i + 1}. ${p.title}\n${p.text === p.title ? '' : p.text + '\n'}   — ${date}`
+  })
+  await reply(chatId, `🔎 Results for "${query}":\n\n${lines.join('\n\n')}`)
+}
+
+// ---------------------------------------------------------------------------
+// /ask — answer a question from your own notes
+// ---------------------------------------------------------------------------
+const ASK_SYSTEM =
+  "You answer the user's question using ONLY the notes from their personal knowledge base " +
+  'provided below. Be direct and practical, like a sharp assistant who knows their business. ' +
+  'Cite the notes you use with their numbers in brackets, e.g. [2]. If the notes do not ' +
+  'contain the answer, say so plainly and do not make anything up. Plain text, no markdown ' +
+  'headings, under 250 words.'
+
+async function askBrain(chatId: number, question: string) {
+  if (!question) {
+    await reply(chatId, 'Ask me something about your notes. Try:\n/ask what do I say when a customer says a competitor is cheaper?')
+    return
+  }
+  await reply(chatId, '🤔 Checking your brain…')
+  const hits = await smartSearch(question, 8)
+  if (!hits.length) {
+    await reply(chatId, "I couldn't find anything in your brain about that.")
+    return
+  }
+  const notes = hits.map((h, i) => {
+    const p = passage(h, 1500)
+    return `[${i + 1}] ${p.title} (${h.created_at.slice(0, 10)})\n${p.text}`
+  }).join('\n\n')
+  const llm = await internal('call-llm', {
+    systemPrompt: ASK_SYSTEM,
+    prompt: `Question: ${question}\n\nNotes:\n\n${notes}`,
+    maxTokens: 1500,
+    userId: OWNER_USER_ID,
+    source: 'telegram-ask',
+  })
+  if (!llm.text) {
+    await reply(chatId, `⚠️ Couldn't get an answer right now (${llm.error ?? 'AI unavailable'}). Try ? ${question.slice(0, 40)} for raw search results.`)
+    return
+  }
+  const sources = hits.map((h, i) => `${i + 1}. ${passage(h, 0).title.slice(0, 70)}`).join('\n')
+  await reply(chatId, `💡 ${llm.text.trim()}\n\n📚 Notes used:\n${sources}`)
 }
 
 async function recentThoughts(chatId: number) {
@@ -231,8 +319,11 @@ Deno.serve(async (req) => {
     if (lower === '/start') {
       await reply(
         chatId,
-        "👋 I'm your Open Brain.\n\n• Send any message and I'll save it\n• Send a YouTube or article link and I'll capture the whole thing\n• /private <text or link> to save it privately\n• /search <words> (or ? <words>) to search\n• /recent to see your last 5 thoughts",
+        "👋 I'm your Open Brain.\n\n• Send any message and I'll save it\n• Send a YouTube or article link and I'll capture the whole thing\n• /private <text or link> to save it privately\n• /ask <question> to get an answer from your notes\n• /search <words> (or ? <words>) to search\n• /recent to see your last 5 thoughts",
       )
+    } else if (lower.startsWith('/ask')) {
+      // Searching + writing an answer can take ~10–20s: finish in the background
+      await inBackground(askBrain(chatId, text.slice('/ask'.length).trim()))
     } else if (lower.startsWith('/search')) {
       await searchThoughts(chatId, text.slice('/search'.length).trim())
     } else if (text.startsWith('?')) {
