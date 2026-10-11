@@ -359,7 +359,7 @@ function toolText(text: string, isError = false) {
 // JSON-RPC: route one message to the right handler
 // ---------------------------------------------------------------------------
 // deno-lint-ignore no-explicit-any
-async function handleMessage(msg: any) {
+async function handleMessage(msg: any, client: McpClient) {
   const { id, method, params } = msg ?? {}
   const isNotification = id === undefined || id === null
   const ok = (result: unknown) => ({ jsonrpc: '2.0', id, result })
@@ -384,8 +384,12 @@ async function handleMessage(msg: any) {
       case 'ping':
         return ok({})
       case 'tools/list':
-        return ok({ tools: TOOLS })
+        // Each app only sees the tools its key allows
+        return ok({ tools: TOOLS.filter((t) => client.tools.includes(t.name)) })
       case 'tools/call':
+        if (!client.tools.includes(params?.name)) {
+          return ok(toolText(`This connection (${client.name}) is not allowed to use ${params?.name}.`, true))
+        }
         return ok(await callTool(params?.name, params?.arguments ?? {}))
       default:
         return fail(-32601, `Method not found: ${method}`)
@@ -396,6 +400,36 @@ async function handleMessage(msg: any) {
     if (method === 'tools/call') return ok(toolText(`Error: ${(err as Error).message ?? err}`, true))
     return fail(-32603, 'Internal error')
   }
+}
+
+// ---------------------------------------------------------------------------
+// WHO IS CONNECTING — one key per app, each with its own allowed tools
+// ---------------------------------------------------------------------------
+// MCP_ACCESS_KEY (the original key, used by Claude Desktop) gets all three
+// tools. Other apps get their own key, listed in the mcp_clients table by a
+// SHA-256 fingerprint (never the key itself), with only the tools you chose —
+// e.g. Hermes: search only, so it can't add, and can't browse recent thoughts.
+// Turn an app off by setting active = false on its row.
+interface McpClient { name: string; tools: string[] }
+const ALL_TOOLS = ['search_thoughts', 'list_recent', 'add_thought']
+
+async function sha256Hex(text: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+async function identifyClient(token: string): Promise<McpClient | null> {
+  if (!token) return null
+  if (safeEqual(token, MCP_ACCESS_KEY)) return { name: 'Claude Desktop (main key)', tools: ALL_TOOLS }
+  const { data } = await admin
+    .from('mcp_clients')
+    .select('id, name, allowed_tools')
+    .eq('key_hash', await sha256Hex(token))
+    .eq('active', true)
+    .maybeSingle()
+  if (!data) return null
+  admin.from('mcp_clients').update({ last_used_at: new Date().toISOString() }).eq('id', data.id).then(() => {}, () => {})
+  return { name: data.name, tools: (data.allowed_tools ?? []).filter((t: string) => ALL_TOOLS.includes(t)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -419,13 +453,17 @@ Deno.serve(async (req) => {
   }
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '')
   const address = callerAddress(req)
-  if (!safeEqual(token, MCP_ACCESS_KEY)) {
+  const client = await identifyClient(token)
+  if (!client) {
     // Alert at most once an hour per address
     await securityAlert('mcp_bad_key', { address }, { dedupKey: address, windowMinutes: 60 })
     return json({ error: 'Unauthorized' }, 401)
   }
-  // Right key from an address we haven't seen in 30 days: tell you about it
-  await securityAlert('mcp_new_address', { address }, { dedupKey: address, windowMinutes: 60 * 24 * 30 })
+  // Right key from an address we haven't seen in 30 days (per app): tell you about it
+  await securityAlert('mcp_new_address', { app: client.name, address }, {
+    dedupKey: `${client.name}|${address}`,
+    windowMinutes: 60 * 24 * 30,
+  })
 
   let body: unknown
   try {
@@ -436,9 +474,9 @@ Deno.serve(async (req) => {
 
   // A request can be one message or a batch (array) of messages
   if (Array.isArray(body)) {
-    const replies = (await Promise.all(body.map(handleMessage))).filter(Boolean)
+    const replies = (await Promise.all(body.map((m) => handleMessage(m, client)))).filter(Boolean)
     return replies.length ? json(replies) : new Response(null, { status: 202, headers: corsHeaders })
   }
-  const reply = await handleMessage(body)
+  const reply = await handleMessage(body, client)
   return reply ? json(reply) : new Response(null, { status: 202, headers: corsHeaders })
 })
