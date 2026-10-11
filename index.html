@@ -197,6 +197,10 @@
     .private-toggle input { width: auto; margin: 0; }
     .private-toggle.on { border-color: #fbbf24; background: #1f1a0a; }
     .private-toggle.on span:first-of-type { color: #fbbf24; font-weight: 600; }
+    .long-thought summary { list-style: none; cursor: pointer; }
+    .long-thought summary::-webkit-details-marker { display: none; }
+    .long-thought[open] summary { display: none; }
+    .show-all { display: inline-block; margin-top: 6px; color: #a5b4fc; font-size: 13px; }
     .matched-chunk { margin-top: 8px; padding: 10px 12px; border-left: 3px solid #6366f1; background: #12122a; border-radius: 6px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
     .private-badge { color: #fbbf24; font-weight: 600; }
     .privacy-btn { margin-left: auto; background: none; border: 1px solid #2a2a2a; color: #a3a3a3; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
@@ -729,6 +733,17 @@ async function loadRecent() {
   renderThoughts(data, resultsEl);
 }
 
+// Long captures (transcripts, PDFs) show a preview with a "Show all" toggle,
+// so one document doesn't fill the whole screen.
+function renderContent(content) {
+  if (content.length <= 600) return `<div class="thought-content">${escapeHtml(content)}</div>`;
+  return `<details class="long-thought">
+    <summary><div class="thought-content">${escapeHtml(content.slice(0, 600))}…</div>
+      <span class="show-all">Show all (${Math.round(content.length / 1000)}k characters)</span></summary>
+    <div class="thought-content">${escapeHtml(content)}</div>
+  </details>`;
+}
+
 function renderThoughts(data, el) {
   if (!data || !data.length) { el.innerHTML = '<p class="muted">Nothing here yet.</p>'; return; }
   el.innerHTML = data.map(t => `
@@ -745,7 +760,7 @@ function renderThoughts(data, el) {
         <div class="matched-chunk">
           <div class="muted">(from partway through a longer capture)</div>
           …${escapeHtml(t.matched_chunk)}…
-        </div>` : `<div class="thought-content">${escapeHtml(t.content)}</div>`}
+        </div>` : renderContent(t.content)}
     </div>
   `).join('');
 }
