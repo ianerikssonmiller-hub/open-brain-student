@@ -124,12 +124,12 @@ Deno.serve(async (req) => {
     // 4. Save the digest as a thought of its own
     const weekOf = since.slice(0, 10)
     const content = `🧠 Weekly digest — week of ${weekOf} (${thoughts.length} thoughts)\n\n${llm.text.trim()}`
-    const { error: insertError } = await admin.from('thoughts').insert({
+    const { error: insertError } = await admin.from('thoughts').upsert({
       user_id: OWNER_USER_ID,
       content,
       category: 'digest',
       metadata: { source: 'weekly-digest', thought_count: thoughts.length, week_of: weekOf },
-    })
+    }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
     if (insertError) throw insertError
 
     // 5. Optional: send it to you on Telegram

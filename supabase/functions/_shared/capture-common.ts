@@ -49,20 +49,21 @@ export async function saveCapture(opts: {
 }) {
   const { data: thought, error } = await admin
     .from('thoughts')
-    .insert({ user_id: opts.userId, content: opts.content, metadata: opts.metadata })
+    // upsert: capturing the same page/video twice updates instead of duplicating
+    .upsert({ user_id: opts.userId, content: opts.content, metadata: opts.metadata }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
     .select('id')
     .single()
   if (error) throw error
 
   // Non-fatal: the thought is already saved either way, same rule as Level 2.
-  const { error: srcError } = await admin.from('thought_sources').insert({
+  const { error: srcError } = await admin.from('thought_sources').upsert({
     thought_id: thought.id,
     user_id: opts.userId,
     source_text: opts.sourceText,
     source_kind: opts.sourceKind,
     char_count: opts.sourceText.length,
     truncated: false,
-  })
+  }, { onConflict: 'thought_id' })
   if (srcError) console.warn('thought_sources insert failed:', srcError.message)
 
   return thought.id as string

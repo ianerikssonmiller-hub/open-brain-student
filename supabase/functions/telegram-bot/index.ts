@@ -109,12 +109,15 @@ async function saveThought(chatId: number, text: string, isPrivate = false) {
     await reply(chatId, 'Nothing to save. Try: /private my note here')
     return
   }
-  const { error } = await admin.from('thoughts').insert({
+  // upsert: if Telegram redelivers a message, the existing thought is updated
+  // instead of duplicated. is_private is only ever sent as true, so re-sending
+  // a private note without /private can never make it public.
+  const { error } = await admin.from('thoughts').upsert({
     content: text,
     user_id: OWNER_USER_ID,
-    is_private: isPrivate,
+    ...(isPrivate ? { is_private: true } : {}),
     metadata: { source: 'telegram' },
-  })
+  }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
   if (error) throw error
   await reply(chatId, isPrivate ? '🔒 Saved privately to your brain' : '🧠 Saved to your brain')
 }

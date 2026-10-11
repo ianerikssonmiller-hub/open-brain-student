@@ -172,7 +172,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
     if (!content) return toolText('Nothing to save — content was empty.', true)
     const { data, error } = await admin
       .from('thoughts')
-      .insert({ content, user_id: OWNER_USER_ID, metadata: { source: 'mcp' } })
+      // upsert: saving the exact same text twice updates instead of duplicating
+      .upsert({ content, user_id: OWNER_USER_ID, metadata: { source: 'mcp' } }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
       .select('id, created_at')
       .single()
     if (error) throw error

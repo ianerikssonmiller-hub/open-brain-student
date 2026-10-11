@@ -405,25 +405,27 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ===== SAVE HELPER =====
 async function saveThought(content, metadata = {}) {
-  const { data, error } = await supabaseClient.from('thoughts').insert({
+  // upsert: saving the exact same text again updates the existing thought
+  // instead of creating a duplicate (the database fingerprints each thought)
+  const { data, error } = await supabaseClient.from('thoughts').upsert({
     content,
     user_id: currentUser.id,
     metadata
-  }).select().single();
+  }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false }).select().single();
   if (error) throw error;
   return data;
 }
 
 async function saveSource(thoughtId, sourceText, sourceKind) {
   try {
-    await supabaseClient.from('thought_sources').insert({
+    await supabaseClient.from('thought_sources').upsert({
       thought_id: thoughtId,
       user_id: currentUser.id,
       source_text: sourceText,
       source_kind: sourceKind,
       char_count: sourceText.length,
       truncated: false
-    });
+    }, { onConflict: 'thought_id' });
   } catch (err) {
     console.warn('Failed to save thought_sources row:', err);
   }
