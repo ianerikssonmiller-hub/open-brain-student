@@ -197,6 +197,7 @@
     .private-toggle input { width: auto; margin: 0; }
     .private-toggle.on { border-color: #fbbf24; background: #1f1a0a; }
     .private-toggle.on span:first-of-type { color: #fbbf24; font-weight: 600; }
+    .matched-chunk { margin-top: 8px; padding: 10px 12px; border-left: 3px solid #6366f1; background: #12122a; border-radius: 6px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
     .private-badge { color: #fbbf24; font-weight: 600; }
     .privacy-btn { margin-left: auto; background: none; border: 1px solid #2a2a2a; color: #a3a3a3; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
     .privacy-btn:hover { border-color: #6366f1; color: #e5e5e5; }
@@ -703,13 +704,16 @@ async function doSearch() {
   const resultsEl = document.getElementById('searchResults');
   if (!query) return;
   resultsEl.innerHTML = '<p class="muted">Searching...</p>';
-  const { data, error } = await supabaseClient
-    .from('thoughts')
-    .select('*')
-    .ilike('content', `%${query}%`)
-    .order('created_at', { ascending: false });
-  if (error) { resultsEl.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
-  renderThoughts(data, resultsEl);
+  // Hybrid search (meaning + keywords + chunks of long captures) runs on the
+  // server in search-brain, because it needs your OpenAI key for embeddings.
+  try {
+    const { data, error } = await supabaseClient.functions.invoke('search-brain', { body: { query } });
+    if (error) throw error;
+    if (!data.ok) throw new Error(data.error);
+    renderThoughts(data.results, resultsEl);
+  } catch (err) {
+    resultsEl.innerHTML = `<p class="muted">Error: ${escapeHtml(err.message || String(err))}</p>`;
+  }
 }
 
 // ===== RECENT =====
@@ -736,7 +740,12 @@ function renderThoughts(data, el) {
           ${t.is_private ? '🔓 Make public' : '🔒 Make private'}
         </button>
       </div>
-      <div class="thought-content">${escapeHtml(t.content)}</div>
+      ${t.matched_chunk ? `
+        <div class="thought-content"><strong>${escapeHtml(t.content.split('\n')[0].slice(0, 120))}</strong></div>
+        <div class="matched-chunk">
+          <div class="muted">(from partway through a longer capture)</div>
+          …${escapeHtml(t.matched_chunk)}…
+        </div>` : `<div class="thought-content">${escapeHtml(t.content)}</div>`}
     </div>
   `).join('');
 }

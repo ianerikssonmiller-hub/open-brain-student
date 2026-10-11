@@ -139,6 +139,27 @@ function formatThoughts(
     .join('\n\n---\n\n')
 }
 
+// Hybrid results: when the match came from inside a long capture, show that
+// chunk (the passage that actually matched) instead of the document's opening.
+function formatHybrid(
+  rows: { id: string; content: string; created_at: string; similarity: number; matched_chunk: string | null }[],
+  query: string,
+) {
+  return rows
+    .map((r) => {
+      const score = r.similarity > 0 ? ` — ${Math.round(r.similarity * 100)}% meaning match` : ' — keyword match'
+      const header = `[${r.created_at.slice(0, 10)}] (id ${r.id})${score}`
+      if (r.matched_chunk) {
+        const title = r.content.split('\n')[0].slice(0, 120)
+        const chunk = r.matched_chunk.replace(/\s+/g, ' ').trim()
+        const shortChunk = chunk.length > PREVIEW_CHARS ? chunk.slice(0, PREVIEW_CHARS) + '…' : chunk
+        return `${header}\n${title}\n(from partway through a longer capture)\n…${shortChunk}`
+      }
+      return `${header}\n${preview(r.content, query)}`
+    })
+    .join('\n\n---\n\n')
+}
+
 // THE GRAPH — for the top results, follow their links (thought_links) and
 // show the connected thoughts as short previews. Same rules as everything
 // else: only your thoughts, never private ones, previews only.
@@ -220,29 +241,32 @@ async function callTool(name: string, args: Record<string, unknown>) {
     const query = String(args.query ?? '').trim()
     if (!query) return toolText('Please provide something to search for.', true)
 
-    // 1. Meaning search: turn the query into coordinates, find the nearest
-    //    thoughts (the search_thoughts database function filters to your
-    //    thoughts and skips private ones — rule 3)
+    // 1. Hybrid search: meaning AND exact keywords, fused into one ranking,
+    //    and long captures matched by their best chunk. p_user_id is required:
+    //    this server uses the service role key, which skips row-level
+    //    security, so it must say whose thoughts to search. Private thoughts
+    //    are excluded (p_include_private defaults to false) — rule 3.
+    //    If the embedding fails, search still runs on keywords alone.
     const embedding = await embedQuery(query)
-    if (embedding) {
-      const { data, error } = await admin.rpc('search_thoughts', {
-        query_embedding: embedding,
-        p_user_id: OWNER_USER_ID,
-        match_threshold: 0.3,
-        match_count: 10,
-      })
-      if (error) throw error
-      if (data?.length) {
-        const lines = formatThoughts(data, query, data.map((r: { similarity: number }) => r.similarity))
-        const linked = await linkedThoughts(data.slice(0, 5).map((r: { id: string }) => r.id))
-        return toolText(`${data.length} thought(s) related in meaning to "${query}":\n\n${lines}${linked}`)
-      }
+    const { data, error } = await admin.rpc('search_thoughts', {
+      query_text: query,
+      p_user_id: OWNER_USER_ID,
+      query_embedding: embedding,
+      match_threshold: 0.3,
+      match_count: 10,
+      max_per_document: 2,
+    })
+    if (error) throw error
+    if (data?.length) {
+      const lines = formatHybrid(data, query)
+      const linked = await linkedThoughts(data.slice(0, 5).map((r: { id: string }) => r.id))
+      return toolText(`${data.length} thought(s) found for "${query}" (meaning + keywords):\n\n${lines}${linked}`)
     }
 
     // 2. Fallback: exact keyword search (if embedding failed or nothing was close)
     // % and _ are wildcards in ilike — escape them so they match literally
     const escaped = query.replace(/[\\%_]/g, (c) => '\\' + c)
-    const { data, error } = await admin
+    const { data: kwData, error: kwError } = await admin
       .from('thoughts')
       .select('id, content, created_at')
       .eq('user_id', OWNER_USER_ID)
@@ -250,9 +274,9 @@ async function callTool(name: string, args: Record<string, unknown>) {
       .ilike('content', `%${escaped}%`)
       .order('created_at', { ascending: false })
       .limit(10)
-    if (error) throw error
-    if (!data?.length) return toolText(`No thoughts match "${query}".`)
-    return toolText(`${data.length} thought(s) containing "${query}":\n\n${formatThoughts(data, query)}`)
+    if (kwError) throw kwError
+    if (!kwData?.length) return toolText(`No thoughts match "${query}".`)
+    return toolText(`${kwData.length} thought(s) containing "${query}":\n\n${formatThoughts(kwData, query)}`)
   }
 
   if (name === 'list_recent') {

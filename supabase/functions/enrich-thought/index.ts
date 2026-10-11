@@ -12,6 +12,8 @@
 // Level 6: it also creates the thought's embedding (its meaning as 1,536
 // numbers) through generate-embedding, so meaning-based search can find it,
 // and links it to its closest neighbours in thought_links (the thought graph).
+// Level 7: long captures are also split into chunks (thought_chunks), each
+// with its own embedding, so a buried detail can be found.
 //   - very short thoughts (under 20 characters) — nothing worth tagging
 //   - weekly digests — they are already a summary
 //   - anything already enriched
@@ -21,6 +23,7 @@
 // ============================================================================
 
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { saveThoughtChunksSafe } from '../_shared/thought-chunks.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? ''
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -220,6 +223,21 @@ Deno.serve(async (req) => {
       } catch (e) {
         notes.push(`embedding/linking error: ${e}`)
       }
+    }
+
+    // Level 7: chunk it, if it's long enough to be worth it (over 2,000
+    // characters — saveThoughtChunksSafe quietly does nothing otherwise, and
+    // never throws). A long transcript can mean dozens of embedding calls, so
+    // this finishes in the background after we've answered the webhook.
+    if (thought.content.length > 2000) {
+      const chunking = saveThoughtChunksSafe(
+        admin, thought.id, thought.content, 'enrich-thought', 'summary', thought.user_id,
+      ).then((n) => console.log(`[enrich] ${id}: ${n} chunk(s) saved`))
+      // deno-lint-ignore no-explicit-any
+      const runtime = (globalThis as any).EdgeRuntime
+      if (runtime?.waitUntil) runtime.waitUntil(chunking)
+      else await chunking
+      notes.push('chunking started')
     }
 
     return ok(`${id}: ${notes.join('; ') || 'nothing to do'}`)
