@@ -614,6 +614,7 @@ let pdfFileName = '';
 let currentPdf = null;       // the opened PDF, kept so pages can be rendered as pictures
 let currentPdfFile = null;   // the original file, saved to your private storage
 let visualPages = [];        // page numbers that contain charts, images or diagrams
+let imageOnlyPdf = false;    // no text layer at all (scanned, infographic) — read the pages as pictures
 
 pdfDrop.addEventListener('click', () => pdfFile.click());
 pdfDrop.addEventListener('dragover', (e) => { e.preventDefault(); pdfDrop.classList.add('dragover'); });
@@ -662,9 +663,18 @@ async function handlePdf(file) {
       fullText += content.items.map(it => it.str).join(' ') + '\n\n';
       try { if (await pageHasVisuals(page)) visualPages.push(i); } catch { /* skip */ }
     }
+    const extracted = decodeEntities(fullText.trim());
+    // No readable text (a scan, an infographic, slides saved as pictures):
+    // treat every page as a picture so the AI can read it
+    imageOnlyPdf = extracted.replace(/\s+/g, '').length < 20;
+    if (imageOnlyPdf) visualPages = Array.from({ length: pdf.numPages }, (_, k) => k + 1);
     visualPages = visualPages.slice(0, 12); // keeps cost and time sensible
-    pdfText.value = decodeEntities(fullText.trim());
-    const visualNote = visualPages.length
+    pdfText.value = imageOnlyPdf ? '' : extracted;
+    const visualNote = imageOnlyPdf
+      ? ` This PDF has no text layer (it's made of images)${savingPrivately()
+          ? ' — with "Save as private" on, only the file itself will be stored.'
+          : ` — the AI will read the words and describe the visuals on ${visualPages.length} page(s) when you save.`}`
+      : visualPages.length
       ? ` Found charts/images on ${visualPages.length} page(s) — they'll be described too${savingPrivately() ? ' (not while "Save as private" is on)' : ''}.`
       : '';
     pdfProgress.textContent = `Extracted ${pdf.numPages} page(s) from ${pdfFileName}.${visualNote} Review below before saving.`;
@@ -688,9 +698,10 @@ async function renderPage(pageNum) {
 }
 
 savePdfBtn.addEventListener('click', async () => {
-  const text = pdfText.value.trim();
-  if (!text) return alert('No text to save.');
   const isPrivate = savingPrivately();
+  let text = pdfText.value.trim();
+  if (!text && imageOnlyPdf) text = '(This PDF has no text layer — its content is read from the page images below.)';
+  if (!text) return alert('No text to save.');
   savePdfBtn.disabled = true;
   try {
     const thought = await saveThought(`📄 PDF: ${pdfFileName}\n\n${text}`, { filename: pdfFileName });
@@ -719,7 +730,7 @@ savePdfBtn.addEventListener('click', async () => {
           const pages = [];
           for (const n of batch) pages.push({ page: n, image: await renderPage(n) });
           const { data, error } = await supabaseClient.functions.invoke('describe-pdf-visuals', {
-            body: { thought_id: thought.id, pages },
+            body: { thought_id: thought.id, pages, transcribe: imageOnlyPdf },
           });
           if (error || !data?.ok) failed += batch.length; else described += batch.length;
         } catch { failed += batch.length; }

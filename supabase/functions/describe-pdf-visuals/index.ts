@@ -11,7 +11,8 @@
 //
 // Privacy: refuses private (🔒) thoughts outright — they never go to an AI.
 //
-// Request:  POST { thought_id, pages: [{ page: number, image: "data:image/jpeg;base64,..." }] }
+// Request:  POST { thought_id, pages: [{ page: number, image: "data:image/jpeg;base64,..." }], transcribe? }
+//           transcribe: true for PDFs with no text layer — the AI also reads the words
 //           (send a few pages per call; the app batches them)
 // Response: { ok: true, described: number }   or   { ok: false, error }
 // ============================================================================
@@ -31,6 +32,7 @@ const SYSTEM_PROMPT =
   'what photos show. Skip anything that is plain body text. Plain text, no markdown.'
 
 const SECTION_HEADER = '\n\n--- Visuals (described by AI) ---'
+const READ_HEADER = '\n\n--- Page contents (read from images by AI) ---'
 
 async function internal(fn: string, body: unknown) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/${fn}`, {
@@ -72,13 +74,17 @@ Deno.serve(async (req) => {
     const pageList = pages.map((p: { page: number }) => p.page).join(', ')
     const llm = await internal('call-llm', {
       systemPrompt: SYSTEM_PROMPT,
-      prompt:
-        `These are pages ${pageList} of a PDF, in that order. For each page that has a chart, ` +
-        'graph, table, diagram, photo or other visual, write "Page N:" followed by a description ' +
-        'of the visual(s) with the actual numbers and labels. If a page has no meaningful visuals, ' +
-        'skip it. If none of the pages do, reply exactly: NONE',
+      prompt: body.transcribe
+        // Image-only PDF (scan, infographic): read the words AND describe the visuals
+        ? `These are pages ${pageList} of a PDF that has no text layer, in that order. For each ` +
+          'page, write "Page N:", then transcribe all of its readable text faithfully, then ' +
+          'describe any charts, tables, diagrams or photos with their actual numbers and labels.'
+        : `These are pages ${pageList} of a PDF, in that order. For each page that has a chart, ` +
+          'graph, table, diagram, photo or other visual, write "Page N:" followed by a description ' +
+          'of the visual(s) with the actual numbers and labels. If a page has no meaningful visuals, ' +
+          'skip it. If none of the pages do, reply exactly: NONE',
       images: pages.map((p: { image: string }) => p.image),
-      maxTokens: 2500,
+      maxTokens: body.transcribe ? 6000 : 2500,
       userId: user.id,
       source: 'describe-pdf-visuals',
     })
@@ -90,9 +96,10 @@ Deno.serve(async (req) => {
     // Re-read (another batch may have just added its own descriptions), then append
     const { data: latest } = await admin.from('thoughts').select('content').eq('id', thought.id).single()
     const current = latest?.content ?? thought.content
-    const updated = current.includes(SECTION_HEADER)
+    const header = body.transcribe ? READ_HEADER : SECTION_HEADER
+    const updated = current.includes(header)
       ? `${current}\n\n${description}`
-      : `${current}${SECTION_HEADER}\n${description}`
+      : `${current}${header}\n${description}`
 
     const { error } = await admin.from('thoughts').update({ content: updated }).eq('id', thought.id)
     if (error) throw error
