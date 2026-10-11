@@ -23,6 +23,7 @@ const TITLES: Record<string, string> = {
   mcp_bad_key: '🚫 Wrong access key used on your AI connection (MCP)',
   mcp_new_address: '🌐 Your AI connection (MCP) was used from a new internet address',
   telegram_stranger: '👤 A stranger messaged your Telegram bot',
+  telegram_forged: '🚫 A fake message (not from Telegram) was sent to your bot',
   digest_bad_secret: '🚫 Wrong password used on your weekly digest function',
   capture_unauthorized: '🚫 Someone without a login tried your capture functions',
 }

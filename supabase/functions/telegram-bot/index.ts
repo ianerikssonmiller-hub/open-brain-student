@@ -17,11 +17,12 @@
 //   TELEGRAM_BOT_TOKEN   your bot's password from BotFather
 //   OWNER_USER_ID        your Supabase user id, so saved thoughts belong to you
 //   TELEGRAM_CHAT_ID     your personal Telegram chat id, so ONLY you can use the bot
+//   TELEGRAM_WEBHOOK_SECRET  password Telegram attaches to every real message
 // Provided automatically by Supabase (you never set these):
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { securityAlert } from '../_shared/security.ts'
+import { callerAddress, securityAlert } from '../_shared/security.ts'
 
 const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? ''
 const OWNER_USER_ID = Deno.env.get('OWNER_USER_ID') ?? ''
@@ -181,6 +182,15 @@ function inBackground(work: Promise<unknown>) {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return ok()
+
+  // Real messages from Telegram carry the secret you registered with
+  // setWebhook (secret_token). Anything without it is a fake — reject it.
+  const WEBHOOK_SECRET = Deno.env.get('TELEGRAM_WEBHOOK_SECRET') ?? ''
+  if (WEBHOOK_SECRET && (req.headers.get('x-telegram-bot-api-secret-token') ?? '') !== WEBHOOK_SECRET) {
+    const address = callerAddress(req)
+    await securityAlert('telegram_forged', { address }, { dedupKey: address, windowMinutes: 60 })
+    return new Response('Unauthorized', { status: 401 })
+  }
 
   let chatId: number | undefined
   try {
