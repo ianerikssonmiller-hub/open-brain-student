@@ -16,7 +16,8 @@
 //   ANTHROPIC_API_KEY     needed when LLM_PROVIDER is 'anthropic'
 // Provided automatically: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 //
-// Request:  POST { prompt, systemPrompt?, model?, maxTokens?, userId?, source? }
+// Request:  POST { prompt, systemPrompt?, model?, maxTokens?, userId?, source?, images? }
+//           images: optional list of data URLs ("data:image/jpeg;base64,...") for vision
 // Response: { text }   or   { error }
 //
 // WHO MAY CALL IT: only your own functions (they send the service role key).
@@ -29,6 +30,8 @@ import { createClient } from 'npm:@supabase/supabase-js@2'
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
 const PROVIDER = (Deno.env.get('LLM_PROVIDER') ?? 'anthropic').toLowerCase()
 const DEFAULT_MODEL = Deno.env.get('LLM_MODEL') ?? ''
+// Optional: a different model for requests that include images. Defaults to LLM_MODEL.
+const VISION_MODEL = Deno.env.get('LLM_VISION_MODEL') ?? ''
 const REASONING_EFFORT = Deno.env.get('LLM_REASONING_EFFORT') ?? ''
 
 const admin = createClient(Deno.env.get('SUPABASE_URL') ?? '', SERVICE_ROLE_KEY)
@@ -84,14 +87,25 @@ function json(body: unknown, status = 200) {
 // ---------------------------------------------------------------------------
 interface LlmResult { text: string; inTokens: number; outTokens: number }
 
-async function callOpenAI(model: string, prompt: string, systemPrompt: string, maxTokens: number): Promise<LlmResult> {
+// Images arrive as data URLs ("data:image/jpeg;base64,....")
+function splitDataUrl(url: string) {
+  const m = url.match(/^data:([^;]+);base64,(.*)$/)
+  return m ? { mediaType: m[1], data: m[2] } : null
+}
+
+async function callOpenAI(model: string, prompt: string, systemPrompt: string, maxTokens: number, images: string[] = []): Promise<LlmResult> {
   const key = Deno.env.get('OPENAI_API_KEY')
   if (!key) throw new Error('OPENAI_API_KEY secret is missing')
   const body: Record<string, unknown> = {
     model,
     messages: [
       ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-      { role: 'user', content: prompt },
+      {
+        role: 'user',
+        content: images.length
+          ? [{ type: 'text', text: prompt }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))]
+          : prompt,
+      },
     ],
     max_completion_tokens: maxTokens,
   }
@@ -111,7 +125,7 @@ async function callOpenAI(model: string, prompt: string, systemPrompt: string, m
   }
 }
 
-async function callAnthropic(model: string, prompt: string, systemPrompt: string, maxTokens: number): Promise<LlmResult> {
+async function callAnthropic(model: string, prompt: string, systemPrompt: string, maxTokens: number, images: string[] = []): Promise<LlmResult> {
   const key = Deno.env.get('ANTHROPIC_API_KEY')
   if (!key) throw new Error('ANTHROPIC_API_KEY secret is missing')
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -125,7 +139,18 @@ async function callAnthropic(model: string, prompt: string, systemPrompt: string
       model,
       max_tokens: maxTokens,
       ...(systemPrompt ? { system: systemPrompt } : {}),
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{
+        role: 'user',
+        content: images.length
+          ? [
+            ...images.map(splitDataUrl).filter(Boolean).map((img) => ({
+              type: 'image',
+              source: { type: 'base64', media_type: img!.mediaType, data: img!.data },
+            })),
+            { type: 'text', text: prompt },
+          ]
+          : prompt,
+      }],
     }),
     signal: AbortSignal.timeout(60_000),
   })
@@ -175,16 +200,17 @@ Deno.serve(async (req) => {
   if (!isServiceRole(req)) return json({ error: 'Unauthorized' }, 401)
 
   try {
-    const { prompt, systemPrompt = '', model, maxTokens = 800, userId, source = 'unknown' } = await req.json()
+    const { prompt, systemPrompt = '', model, maxTokens = 800, userId, source = 'unknown', images = [] } = await req.json()
     if (!prompt || typeof prompt !== 'string') return json({ error: 'prompt is required' }, 400)
 
-    const useModel = model || DEFAULT_MODEL
+    const imageList: string[] = Array.isArray(images) ? images.filter((i) => typeof i === 'string') : []
+    const useModel = model || (imageList.length && VISION_MODEL) || DEFAULT_MODEL
     if (!useModel) return json({ error: 'No model set — add LLM_MODEL in Supabase secrets' }, 500)
 
     const provider = PROVIDERS[PROVIDER]
     if (!provider) return json({ error: `Unknown LLM_PROVIDER "${PROVIDER}" — use openai or anthropic` }, 500)
 
-    const result = await provider(useModel, prompt, systemPrompt, maxTokens)
+    const result = await provider(useModel, prompt, systemPrompt, maxTokens, imageList)
     logUsage(userId, useModel, source, result)
     return json({ text: result.text })
   } catch (err) {

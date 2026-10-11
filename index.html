@@ -611,6 +611,9 @@ const pdfProgress = document.getElementById('pdfProgress');
 const pdfText = document.getElementById('pdfText');
 const savePdfBtn = document.getElementById('savePdfBtn');
 let pdfFileName = '';
+let currentPdf = null;       // the opened PDF, kept so pages can be rendered as pictures
+let currentPdfFile = null;   // the original file, saved to your private storage
+let visualPages = [];        // page numbers that contain charts, images or diagrams
 
 pdfDrop.addEventListener('click', () => pdfFile.click());
 pdfDrop.addEventListener('dragover', (e) => { e.preventDefault(); pdfDrop.classList.add('dragover'); });
@@ -624,9 +627,25 @@ pdfFile.addEventListener('change', () => {
   if (pdfFile.files.length) handlePdf(pdfFile.files[0]);
 });
 
+// Does this page have visuals? Images show up as "paint image" drawing steps;
+// charts, diagrams and bordered tables show up as lots of drawn shapes.
+async function pageHasVisuals(page) {
+  const ops = await page.getOperatorList();
+  const O = pdfjsLib.OPS;
+  let images = 0, shapes = 0;
+  for (const fn of ops.fnArray) {
+    if (fn === O.paintImageXObject || fn === O.paintInlineImageXObject ||
+        fn === O.paintImageMaskXObject || fn === O.paintJpegXObject) images++;
+    else if (fn === O.constructPath) shapes++;
+  }
+  return images > 0 || shapes >= 40;
+}
+
 async function handlePdf(file) {
   if (file.type !== 'application/pdf') return alert('Please choose a PDF file.');
   pdfFileName = file.name;
+  currentPdfFile = file;
+  visualPages = [];
   pdfProgress.textContent = 'Reading file...';
   pdfText.style.display = 'none';
   savePdfBtn.style.display = 'none';
@@ -634,15 +653,21 @@ async function handlePdf(file) {
   try {
     const buffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    currentPdf = pdf;
     let fullText = '';
     for (let i = 1; i <= pdf.numPages; i++) {
       pdfProgress.textContent = `Extracting page ${i} of ${pdf.numPages}...`;
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
       fullText += content.items.map(it => it.str).join(' ') + '\n\n';
+      try { if (await pageHasVisuals(page)) visualPages.push(i); } catch { /* skip */ }
     }
+    visualPages = visualPages.slice(0, 12); // keeps cost and time sensible
     pdfText.value = decodeEntities(fullText.trim());
-    pdfProgress.textContent = `Extracted ${pdf.numPages} page(s) from ${pdfFileName}. Review below before saving.`;
+    const visualNote = visualPages.length
+      ? ` Found charts/images on ${visualPages.length} page(s) — they'll be described too${savingPrivately() ? ' (not while "Save as private" is on)' : ''}.`
+      : '';
+    pdfProgress.textContent = `Extracted ${pdf.numPages} page(s) from ${pdfFileName}.${visualNote} Review below before saving.`;
     pdfText.style.display = 'block';
     savePdfBtn.style.display = 'inline-block';
   } catch (err) {
@@ -650,17 +675,67 @@ async function handlePdf(file) {
   }
 }
 
+// Render one page as a JPEG picture (at most ~1200px wide)
+async function renderPage(pageNum) {
+  const page = await currentPdf.getPage(pageNum);
+  const base = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: Math.min(2, 1200 / base.width) });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  return canvas.toDataURL('image/jpeg', 0.75);
+}
+
 savePdfBtn.addEventListener('click', async () => {
   const text = pdfText.value.trim();
   if (!text) return alert('No text to save.');
+  const isPrivate = savingPrivately();
+  savePdfBtn.disabled = true;
   try {
-    await saveThought(`📄 PDF: ${pdfFileName}\n\n${text}`, { filename: pdfFileName });
+    const thought = await saveThought(`📄 PDF: ${pdfFileName}\n\n${text}`, { filename: pdfFileName });
     pdfText.value = '';
     pdfText.style.display = 'none';
     savePdfBtn.style.display = 'none';
-    pdfProgress.textContent = 'Saved! Drop another PDF to capture more.';
+
+    // 1. Keep the original file in your private storage folder
+    pdfProgress.textContent = 'Saving the original PDF…';
+    const filePath = `${currentUser.id}/${thought.id}.pdf`;
+    const { error: upErr } = await supabaseClient.storage.from('pdfs')
+      .upload(filePath, currentPdfFile, { upsert: true, contentType: 'application/pdf' });
+    if (!upErr) {
+      await supabaseClient.from('thoughts')
+        .update({ metadata: { ...(thought.metadata || {}), filename: pdfFileName, file_path: filePath } })
+        .eq('id', thought.id);
+    }
+
+    // 2. Describe the visuals (never for private PDFs)
+    let described = 0, failed = 0;
+    if (!isPrivate && visualPages.length) {
+      for (let i = 0; i < visualPages.length; i += 3) {
+        const batch = visualPages.slice(i, i + 3);
+        pdfProgress.textContent = `Describing charts & images: page ${batch.join(', ')} (${Math.min(i + 3, visualPages.length)} of ${visualPages.length})…`;
+        try {
+          const pages = [];
+          for (const n of batch) pages.push({ page: n, image: await renderPage(n) });
+          const { data, error } = await supabaseClient.functions.invoke('describe-pdf-visuals', {
+            body: { thought_id: thought.id, pages },
+          });
+          if (error || !data?.ok) failed += batch.length; else described += batch.length;
+        } catch { failed += batch.length; }
+      }
+    }
+
+    const parts = ['Saved!'];
+    parts.push(upErr ? '(Original file could not be stored.)' : 'Original PDF stored privately.');
+    if (isPrivate && visualPages.length) parts.push('Visuals not described — this PDF is private.');
+    else if (described) parts.push(`Charts & images described on ${described} page(s).`);
+    if (failed) parts.push(`${failed} page(s) couldn't be described.`);
+    pdfProgress.textContent = parts.join(' ') + ' Drop another PDF to capture more.';
   } catch (err) {
     alert('Error saving: ' + err.message);
+  } finally {
+    savePdfBtn.disabled = false;
   }
 });
 
