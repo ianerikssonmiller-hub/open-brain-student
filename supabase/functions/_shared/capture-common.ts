@@ -48,6 +48,10 @@ export async function getCaller(req: Request, body?: { user_id?: unknown }) {
 }
 
 function isServiceRoleToken(token: string) {
+  // Your own functions send the copy of the key Supabase gave them — accept it
+  // as-is (it may not be in the JWT format checked below)
+  const ownKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  if (ownKey && token === ownKey) return true
   try {
     const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
     const claims = JSON.parse(atob(part + '='.repeat((4 - (part.length % 4)) % 4)))
