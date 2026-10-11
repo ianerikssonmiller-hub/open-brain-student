@@ -204,6 +204,8 @@
     .matched-chunk { margin-top: 8px; padding: 10px 12px; border-left: 3px solid #6366f1; background: #12122a; border-radius: 6px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
     .private-badge { color: #fbbf24; font-weight: 600; }
     .privacy-btn { margin-left: auto; background: none; border: 1px solid #2a2a2a; color: #a3a3a3; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+    .open-pdf-btn { background: none; border: 1px solid #2a2a2a; color: #a5b4fc; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+    .open-pdf-btn:hover { border-color: #6366f1; color: #e5e5e5; }
     .privacy-btn:hover { border-color: #6366f1; color: #e5e5e5; }
     .thought-content { font-size: 14px; white-space: pre-wrap; word-break: break-word; }
     .badge {
@@ -837,6 +839,7 @@ function renderThoughts(data, el) {
       <div class="thought-meta">
         <span>${new Date(t.created_at).toLocaleString()}</span>
         ${t.is_private ? '<span class="private-badge">🔒 Private</span>' : ''}
+        ${t.metadata && t.metadata.file_path ? `<button class="open-pdf-btn" data-path="${escapeHtml(t.metadata.file_path)}">📎 Open original PDF</button>` : ''}
         <button class="privacy-btn" data-id="${t.id}" data-private="${t.is_private ? '1' : ''}">
           ${t.is_private ? '🔓 Make public' : '🔒 Make private'}
         </button>
@@ -850,6 +853,21 @@ function renderThoughts(data, el) {
     </div>
   `).join('');
 }
+
+// ===== OPEN ORIGINAL PDF =====
+// Makes a private link to your own file that works for 5 minutes, then opens it.
+// The tab is opened first (before waiting) so Safari doesn't block it as a pop-up.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.open-pdf-btn');
+  if (!btn) return;
+  const tab = window.open('', '_blank');
+  const { data, error } = await supabaseClient.storage.from('pdfs').createSignedUrl(btn.dataset.path, 300);
+  if (error || !data?.signedUrl) {
+    if (tab) tab.close();
+    return alert('Could not open the file: ' + (error?.message || 'not found'));
+  }
+  if (tab) tab.location = data.signedUrl; else window.location = data.signedUrl;
+});
 
 // ===== PRIVATE FLAG =====
 // Private thoughts stay visible to you here, but are hidden from the Telegram

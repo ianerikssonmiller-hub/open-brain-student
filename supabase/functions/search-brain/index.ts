@@ -106,13 +106,19 @@ Deno.serve(async (req) => {
 
     // Add each result's private flag so the app can show the 🔒 label
     const ids = (data ?? []).map((r: { id: string }) => r.id)
-    const privateIds = new Set<string>()
+    // Add each result's private flag (for the 🔒 label) and metadata (for the
+    // "Open original PDF" button)
+    const extras = new Map<string, { is_private: boolean; metadata: unknown }>()
     if (ids.length) {
-      const { data: flags } = await admin
-        .from('thoughts').select('id, is_private').in('id', ids).eq('user_id', user.id)
-      for (const f of flags ?? []) if (f.is_private) privateIds.add(f.id)
+      const { data: rows } = await admin
+        .from('thoughts').select('id, is_private, metadata').in('id', ids).eq('user_id', user.id)
+      for (const r of rows ?? []) extras.set(r.id, { is_private: r.is_private, metadata: r.metadata })
     }
-    const results = (data ?? []).map((r: { id: string }) => ({ ...r, is_private: privateIds.has(r.id) }))
+    const results = (data ?? []).map((r: { id: string }) => ({
+      ...r,
+      is_private: extras.get(r.id)?.is_private ?? false,
+      metadata: extras.get(r.id)?.metadata ?? {},
+    }))
     await addBestPassages(results, text, embedding)
 
     return jsonResponse({ ok: true, results, used_meaning: embedding !== null })
