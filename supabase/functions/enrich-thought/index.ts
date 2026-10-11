@@ -209,6 +209,13 @@ Deno.serve(async (req) => {
     if (thought.category === 'digest') return ok(`${id} is a digest — skipped`)
     if (!thought.content || thought.content.trim().length < 20) return ok(`${id} too short — skipped`)
 
+    // Backfill mode: tag an older thought only (it already has its embedding,
+    // links and chunks) — called by a one-off loop, not by the webhook
+    if (payload.tags_only) {
+      if (thought.enriched_at) return ok(`${id} already tagged — skipped`)
+      return ok(`${id}: ${await tagThought(thought)}`)
+    }
+
     // Each step is independent: if tagging fails, the embedding still happens
     const notes: string[] = []
     if (!thought.enriched_at) {
