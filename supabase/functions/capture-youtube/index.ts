@@ -205,7 +205,7 @@ Deno.serve(async (req) => {
     const user = await getCaller(req)
     if (!user) return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
 
-    const { url } = await req.json()
+    const { url, is_private } = await req.json()
     if (!url || typeof url !== 'string') {
       return jsonResponse({ ok: false, error: 'A YouTube link is required' })
     }
@@ -244,6 +244,7 @@ Deno.serve(async (req) => {
       },
       sourceText: result.content,
       sourceKind: result.hasTranscript ? 'youtube_transcript' : 'youtube_description',
+      isPrivate: is_private === true,
     })
 
     return jsonResponse({

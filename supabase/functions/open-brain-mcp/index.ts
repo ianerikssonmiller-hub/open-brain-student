@@ -55,14 +55,15 @@ const TOOLS = [
   {
     name: 'search_thoughts',
     description:
-      "Search the user's personal knowledge base (their 'Open Brain') for thoughts " +
-      'containing a word or phrase. Includes notes, voice captures, YouTube transcripts, ' +
+      "Search the user's personal knowledge base (their 'Open Brain') by MEANING — " +
+      'it finds related thoughts even when they use different words, plus thoughts ' +
+      'linked to the top results in the brain\'s connection graph. Includes notes, voice captures, YouTube transcripts, ' +
       'PDFs, articles and Telegram messages. Returns up to 10 matches as short previews. ' +
-      'Use short keywords (one to three words) rather than full questions.',
+      'Describe the topic in a few natural words (e.g. "getting new customers").',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Word or phrase to search for' },
+        query: { type: 'string', description: 'Topic or question to search for' },
       },
       required: ['query'],
     },
@@ -125,10 +126,90 @@ function preview(content: string, query?: string) {
   return content.slice(0, PREVIEW_CHARS).trim() + '…'
 }
 
-function formatThoughts(rows: { id: string; content: string; created_at: string }[], query?: string) {
+function formatThoughts(
+  rows: { id: string; content: string; created_at: string }[],
+  query?: string,
+  similarities?: number[],
+) {
   return rows
-    .map((r) => `[${r.created_at.slice(0, 10)}] (id ${r.id})\n${preview(r.content, query)}`)
+    .map((r, i) => {
+      const score = similarities ? ` — ${Math.round(similarities[i] * 100)}% match` : ''
+      return `[${r.created_at.slice(0, 10)}] (id ${r.id})${score}\n${preview(r.content, query)}`
+    })
     .join('\n\n---\n\n')
+}
+
+// THE GRAPH — for the top results, follow their links (thought_links) and
+// show the connected thoughts as short previews. Same rules as everything
+// else: only your thoughts, never private ones, previews only.
+async function linkedThoughts(ids: string[]): Promise<string> {
+  if (!ids.length) return ''
+  const list = ids.join(',')
+  const { data: links } = await admin
+    .from('thought_links')
+    .select('source_thought_id, target_thought_id, similarity_score')
+    .eq('user_id', OWNER_USER_ID)
+    .or(`source_thought_id.in.(${list}),target_thought_id.in.(${list})`)
+    .order('similarity_score', { ascending: false })
+  if (!links?.length) return ''
+
+  // For each result, its neighbours that aren't already in the results
+  const shown = new Set(ids)
+  const byResult = new Map<string, { id: string; score: number }[]>()
+  for (const l of links) {
+    const [from, to] = shown.has(l.source_thought_id) && !shown.has(l.target_thought_id)
+      ? [l.source_thought_id, l.target_thought_id]
+      : shown.has(l.target_thought_id) && !shown.has(l.source_thought_id)
+        ? [l.target_thought_id, l.source_thought_id]
+        : [null, null]
+    if (!from || !to) continue
+    const arr = byResult.get(from) ?? []
+    if (arr.length < 3 && !arr.some((x) => x.id === to)) arr.push({ id: to, score: l.similarity_score })
+    byResult.set(from, arr)
+  }
+  const neighbourIds = [...new Set([...byResult.values()].flat().map((x) => x.id))]
+  if (!neighbourIds.length) return ''
+
+  const { data: neighbours } = await admin
+    .from('thoughts')
+    .select('id, content')
+    .in('id', neighbourIds)
+    .eq('user_id', OWNER_USER_ID)
+    .eq('is_private', false) // rule 3
+  const contentById = new Map((neighbours ?? []).map((n) => [n.id, n.content as string]))
+
+  const sections: string[] = []
+  for (const id of ids) {
+    const items = (byResult.get(id) ?? []).filter((x) => contentById.has(x.id))
+    if (!items.length) continue
+    const lines = items.map((x) => {
+      const text = contentById.get(x.id)!.replace(/\s+/g, ' ')
+      return `  ↳ ${Math.round(x.score * 100)}% linked (id ${x.id}): ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`
+    })
+    sections.push(`Connected to ${id}:\n${lines.join('\n')}`)
+  }
+  return sections.length
+    ? `\n\n=== Connected thoughts (from the brain's link graph) ===\n\n${sections.join('\n\n')}`
+    : ''
+}
+
+// Turn the search query into meaning coordinates via generate-embedding.
+// Returns null on any failure, so search falls back to keywords.
+async function embedQuery(text: string): Promise<number[] | null> {
+  try {
+    const res = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/generate-embedding`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+      },
+      body: JSON.stringify({ text, userId: OWNER_USER_ID, source: 'mcp-search' }),
+    })
+    const { embedding } = await res.json()
+    return Array.isArray(embedding) ? embedding : null
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +219,27 @@ async function callTool(name: string, args: Record<string, unknown>) {
   if (name === 'search_thoughts') {
     const query = String(args.query ?? '').trim()
     if (!query) return toolText('Please provide something to search for.', true)
+
+    // 1. Meaning search: turn the query into coordinates, find the nearest
+    //    thoughts (the search_thoughts database function filters to your
+    //    thoughts and skips private ones — rule 3)
+    const embedding = await embedQuery(query)
+    if (embedding) {
+      const { data, error } = await admin.rpc('search_thoughts', {
+        query_embedding: embedding,
+        p_user_id: OWNER_USER_ID,
+        match_threshold: 0.3,
+        match_count: 10,
+      })
+      if (error) throw error
+      if (data?.length) {
+        const lines = formatThoughts(data, query, data.map((r: { similarity: number }) => r.similarity))
+        const linked = await linkedThoughts(data.slice(0, 5).map((r: { id: string }) => r.id))
+        return toolText(`${data.length} thought(s) related in meaning to "${query}":\n\n${lines}${linked}`)
+      }
+    }
+
+    // 2. Fallback: exact keyword search (if embedding failed or nothing was close)
     // % and _ are wildcards in ilike — escape them so they match literally
     const escaped = query.replace(/[\\%_]/g, (c) => '\\' + c)
     const { data, error } = await admin
@@ -150,7 +252,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
       .limit(10)
     if (error) throw error
     if (!data?.length) return toolText(`No thoughts match "${query}".`)
-    return toolText(`${data.length} thought(s) matching "${query}":\n\n${formatThoughts(data, query)}`)
+    return toolText(`${data.length} thought(s) containing "${query}":\n\n${formatThoughts(data, query)}`)
   }
 
   if (name === 'list_recent') {

@@ -46,11 +46,18 @@ export async function saveCapture(opts: {
   metadata: Record<string, unknown>
   sourceText: string
   sourceKind: string
+  isPrivate?: boolean
 }) {
   const { data: thought, error } = await admin
     .from('thoughts')
     // upsert: capturing the same page/video twice updates instead of duplicating
-    .upsert({ user_id: opts.userId, content: opts.content, metadata: opts.metadata }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
+    // is_private is only ever sent as true, so a re-capture can't make it public
+    .upsert({
+      user_id: opts.userId,
+      content: opts.content,
+      metadata: opts.metadata,
+      ...(opts.isPrivate ? { is_private: true } : {}),
+    }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
     .select('id')
     .single()
   if (error) throw error

@@ -193,6 +193,10 @@
       margin-bottom: 10px;
     }
     .thought-meta { font-size: 11px; color: #737373; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .private-toggle { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; padding: 10px 12px; border: 1px solid #2a2a2a; border-radius: 8px; cursor: pointer; font-size: 14px; }
+    .private-toggle input { width: auto; margin: 0; }
+    .private-toggle.on { border-color: #fbbf24; background: #1f1a0a; }
+    .private-toggle.on span:first-of-type { color: #fbbf24; font-weight: 600; }
     .private-badge { color: #fbbf24; font-weight: 600; }
     .privacy-btn { margin-left: auto; background: none; border: 1px solid #2a2a2a; color: #a3a3a3; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
     .privacy-btn:hover { border-color: #6366f1; color: #e5e5e5; }
@@ -237,6 +241,12 @@
       <button class="tab-btn" data-tab="search">🔍 Search</button>
       <button class="tab-btn" data-tab="recent">🕓 Recent</button>
     </nav>
+
+    <label class="private-toggle" id="privateToggle">
+      <input type="checkbox" id="savePrivate">
+      <span>🔒 Save as private</span>
+      <span class="muted">— never sent to AI, kept out of search, Claude, Telegram and the digest</span>
+    </label>
 
     <!-- VOICE -->
     <section class="panel active" id="panel-voice">
@@ -404,13 +414,26 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // ===== SAVE HELPER =====
+// ===== SAVE AS PRIVATE =====
+// When checked, captures are saved with is_private = true from the very first
+// moment, so the enrichment agent skips them and they never reach an AI.
+// Stays on until you uncheck it — forgetting to uncheck is the safe mistake.
+function savingPrivately() {
+  return document.getElementById('savePrivate').checked;
+}
+document.getElementById('savePrivate').addEventListener('change', (e) => {
+  document.getElementById('privateToggle').classList.toggle('on', e.target.checked);
+});
+
 async function saveThought(content, metadata = {}) {
   // upsert: saving the exact same text again updates the existing thought
   // instead of creating a duplicate (the database fingerprints each thought)
   const { data, error } = await supabaseClient.from('thoughts').upsert({
     content,
     user_id: currentUser.id,
-    metadata
+    metadata,
+    // only ever sent as true, so re-saving can never make a private thought public
+    ...(savingPrivately() ? { is_private: true } : {})
   }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false }).select().single();
   if (error) throw error;
   return data;
@@ -496,7 +519,7 @@ document.getElementById('saveVoiceBtn').addEventListener('click', async () => {
 // function knows whose brain to save into.
 async function callCaptureFunction(name, url) {
   try {
-    const { data, error } = await supabaseClient.functions.invoke(name, { body: { url } });
+    const { data, error } = await supabaseClient.functions.invoke(name, { body: { url, is_private: savingPrivately() } });
     if (error) return { ok: false, error: 'Could not reach the ' + name + ' function: ' + error.message };
     return data;
   } catch (err) {

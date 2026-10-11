@@ -8,6 +8,10 @@
 //
 // It skips:
 //   - thoughts saved as private (🔒) — they never go to an AI
+//
+// Level 6: it also creates the thought's embedding (its meaning as 1,536
+// numbers) through generate-embedding, so meaning-based search can find it,
+// and links it to its closest neighbours in thought_links (the thought graph).
 //   - very short thoughts (under 20 characters) — nothing worth tagging
 //   - weekly digests — they are already a summary
 //   - anything already enriched
@@ -74,6 +78,111 @@ const ok = (note: string) => {
   })
 }
 
+// ---------------------------------------------------------------------------
+// TAGS, CATEGORY, SUMMARY — ask the AI through the call-llm gateway
+// ---------------------------------------------------------------------------
+async function tagThought(thought: { id: string; content: string; user_id: string }) {
+  const llmRes = await fetch(`${SUPABASE_URL}/functions/v1/call-llm`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify({
+      systemPrompt: SYSTEM_PROMPT,
+      prompt: buildPrompt(thought.content),
+      maxTokens: 600,
+      userId: thought.user_id,
+      source: 'enrich-thought',
+    }),
+  })
+  const llm = await llmRes.json()
+  if (!llmRes.ok || !llm.text) return `tagging failed: ${llm.error ?? llmRes.status}`
+
+  const parsed = parseJson(llm.text)
+  const tags = Array.isArray(parsed.tags)
+    ? parsed.tags.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 5)
+    : []
+  // Accept near-misses like "Plan" or "planning"; if the AI invents
+  // something else entirely, leave the category as it was
+  const rawCategory = String(parsed.category ?? '').toLowerCase()
+  const category = CATEGORIES.find((c) => rawCategory.includes(c)) ?? null
+  const summary = typeof parsed.summary === 'string' ? parsed.summary.trim().slice(0, 400) : null
+
+  const { error } = await admin
+    .from('thoughts')
+    .update({
+      tags,
+      summary,
+      enriched_at: new Date().toISOString(),
+      ...(category ? { category } : {}),
+    })
+    .eq('id', thought.id)
+  if (error) return `tag update failed: ${error.message}`
+  return `tagged [${tags.join(', ')}] ${category ?? ''}`.trim()
+}
+
+// ---------------------------------------------------------------------------
+// EMBEDDING — the thought's "map coordinates" of meaning
+// ---------------------------------------------------------------------------
+// NOTE the Authorization header — it is not optional. One edge function calling
+// another must prove who it is, or Supabase rejects the call with a 401 before
+// generate-embedding runs. The symptom is that embeddings silently never appear
+// and the generate-embedding logs are empty, because it never ran.
+async function embedThought(thought: { id: string; content: string; user_id: string }) {
+  const embRes = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify({ text: thought.content, userId: thought.user_id, source: 'enrich-thought' }),
+  })
+  const { embedding, error } = await embRes.json()
+  if (!embedding) return { note: `embedding failed: ${error ?? embRes.status}`, embedding: null }
+
+  const { error: updateError } = await admin.from('thoughts').update({ embedding }).eq('id', thought.id)
+  if (updateError) return { note: `embedding save failed: ${updateError.message}`, embedding: null }
+  return { note: 'embedded', embedding: embedding as number[] }
+}
+
+// ---------------------------------------------------------------------------
+// AUTO-LINK — tie this thought to its nearest neighbours in meaning
+// ---------------------------------------------------------------------------
+// Scoped to the thought's own owner (p_user_id): this runs with the service
+// role key, which skips every login rule, so the filter has to be explicit.
+async function linkThought(thoughtId: string, userId: string, embedding: number[]) {
+  const { data: neighbors, error } = await admin.rpc('find_links_for_thought', {
+    source_id: thoughtId,
+    source_embedding: embedding,
+    p_user_id: userId,
+    match_threshold: 0.5,
+    match_count: 5,
+  })
+  if (error) return `linking failed: ${error.message}`
+  if (!neighbors?.length) return 'no close neighbours yet'
+
+  const links = neighbors.map((n: { target_id: string; similarity: number }) => ({
+    source_thought_id: thoughtId,
+    target_thought_id: n.target_id,
+    user_id: userId, // without this, links would be unowned and invisible to you
+    similarity_score: n.similarity,
+    link_type: 'semantic',
+  }))
+
+  // ignoreDuplicates: an existing link is skipped — no errors, no overwrites.
+  // (A reverse duplicate B→A is refused by the database; insert one at a time
+  // so one refusal doesn't drop the others.)
+  let saved = 0
+  for (const link of links) {
+    const { error: linkErr } = await admin
+      .from('thought_links')
+      .upsert(link, { onConflict: 'source_thought_id,target_thought_id', ignoreDuplicates: true })
+    if (!linkErr) saved++
+  }
+  return `linked to ${saved} neighbour(s)`
+}
+
 Deno.serve(async (req) => {
   // Only the webhook (which sends the service role key) may run this agent —
   // otherwise anyone with your public app key could spend your AI credit.
@@ -87,56 +196,33 @@ Deno.serve(async (req) => {
     // Re-read the row from the database rather than trusting the payload
     const { data: thought, error } = await admin
       .from('thoughts')
-      .select('id, content, user_id, is_private, category, enriched_at')
+      .select('id, content, user_id, is_private, category, enriched_at, embedding')
       .eq('id', id)
       .single()
     if (error || !thought) return ok(`thought ${id} not found — skipped`)
 
+    // Private thoughts never go to an AI — not for tags, not for embeddings
     if (thought.is_private) return ok(`${id} is private — skipped`)
-    if (thought.enriched_at) return ok(`${id} already enriched — skipped`)
     if (thought.category === 'digest') return ok(`${id} is a digest — skipped`)
     if (!thought.content || thought.content.trim().length < 20) return ok(`${id} too short — skipped`)
 
-    // Ask the AI — through the gateway, never directly
-    const llmRes = await fetch(`${SUPABASE_URL}/functions/v1/call-llm`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
-      },
-      body: JSON.stringify({
-        systemPrompt: SYSTEM_PROMPT,
-        prompt: buildPrompt(thought.content),
-        maxTokens: 600,
-        userId: thought.user_id,
-        source: 'enrich-thought',
-      }),
-    })
-    const llm = await llmRes.json()
-    if (!llmRes.ok || !llm.text) return ok(`call-llm failed for ${id}: ${llm.error ?? llmRes.status}`)
+    // Each step is independent: if tagging fails, the embedding still happens
+    const notes: string[] = []
+    if (!thought.enriched_at) {
+      try { notes.push(await tagThought(thought)) } catch (e) { notes.push(`tagging error: ${e}`) }
+    }
+    if (!thought.embedding) {
+      try {
+        const { note, embedding } = await embedThought(thought)
+        notes.push(note)
+        // Only link when we have coordinates — if embedding failed, skip, don't crash
+        if (embedding) notes.push(await linkThought(thought.id, thought.user_id, embedding))
+      } catch (e) {
+        notes.push(`embedding/linking error: ${e}`)
+      }
+    }
 
-    const parsed = parseJson(llm.text)
-    const tags = Array.isArray(parsed.tags)
-      ? parsed.tags.map((t: unknown) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 5)
-      : []
-    // Accept near-misses like "Plan" or "planning"; if the AI invents
-    // something else entirely, leave the category as it was
-    const rawCategory = String(parsed.category ?? '').toLowerCase()
-    const category = CATEGORIES.find((c) => rawCategory.includes(c)) ?? null
-    const summary = typeof parsed.summary === 'string' ? parsed.summary.trim().slice(0, 400) : null
-
-    const { error: updateError } = await admin
-      .from('thoughts')
-      .update({
-        tags,
-        summary,
-        enriched_at: new Date().toISOString(),
-        ...(category ? { category } : {}),
-      })
-      .eq('id', id)
-    if (updateError) return ok(`update failed for ${id}: ${updateError.message}`)
-
-    return ok(`enriched ${id}: [${tags.join(', ')}] ${category}`)
+    return ok(`${id}: ${notes.join('; ') || 'nothing to do'}`)
   } catch (err) {
     return ok(`error: ${String((err as Error).message ?? err)}`)
   }

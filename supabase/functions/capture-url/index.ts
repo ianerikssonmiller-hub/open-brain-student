@@ -24,7 +24,7 @@ Deno.serve(async (req) => {
     const user = await getCaller(req)
     if (!user) return jsonResponse({ ok: false, error: 'Not signed in' }, 401)
 
-    const { url } = await req.json()
+    const { url, is_private } = await req.json()
     if (!url || typeof url !== 'string') {
       return jsonResponse({ ok: false, error: 'A link is required' })
     }
@@ -92,6 +92,7 @@ Deno.serve(async (req) => {
       metadata: { source: 'url', title, url: parsed.toString(), hostname: parsed.hostname },
       sourceText: text,
       sourceKind: 'web',
+      isPrivate: is_private === true,
     })
 
     return jsonResponse({ ok: true, title, hostname: parsed.hostname, chars: text.length })
