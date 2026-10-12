@@ -22,6 +22,7 @@ const TITLES: Record<string, string> = {
   sign_in: '🔑 Someone signed in to your Open Brain app',
   mcp_bad_key: '🚫 Wrong access key used on your AI connection (MCP)',
   mcp_new_address: '🌐 An app connected to your brain (MCP) from a new internet address',
+  mcp_new_app: '🔌 An app connected to your brain for the first time (or after 30 quiet days)',
   telegram_stranger: '👤 A stranger messaged your Telegram bot',
   telegram_forged: '🚫 A fake message (not from Telegram) was sent to your bot',
   digest_bad_secret: '🚫 Wrong password used on your weekly digest function',

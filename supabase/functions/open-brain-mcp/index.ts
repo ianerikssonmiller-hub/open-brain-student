@@ -528,9 +528,12 @@ Deno.serve(async (req) => {
     if (token) await securityAlert('mcp_bad_key', { address }, { dedupKey: address, windowMinutes: 60 })
     return unauthorized()
   }
-  // Right key from an address we haven't seen in 30 days (per app): tell you about it
-  await securityAlert('mcp_new_address', { app: client.name, address }, {
-    dedupKey: `${client.name}|${address}`,
+  // A known app connecting from a new address is normal (ChatGPT uses many
+  // rotating OpenAI servers; your own address changes between Wi-Fi and cell),
+  // so alert only when an app connects for the first time, or after being
+  // quiet for 30 days. Wrong keys/passes still alert every time (above).
+  await securityAlert('mcp_new_app', { app: client.name, address }, {
+    dedupKey: client.name,
     windowMinutes: 60 * 24 * 30,
   })
 
