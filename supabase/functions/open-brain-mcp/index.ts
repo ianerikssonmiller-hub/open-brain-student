@@ -46,6 +46,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers':
     'authorization, content-type, accept, mcp-session-id, mcp-protocol-version',
+  'Access-Control-Expose-Headers': 'WWW-Authenticate',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
@@ -418,9 +419,55 @@ async function sha256Hex(text: string) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+// OAuth apps (e.g. ChatGPT): they sign in through Supabase's OAuth server and
+// present a Supabase-issued access token that carries a client_id claim. We
+// verify it with Supabase, accept it only for YOUR account, and give it the
+// tools listed on the mcp_clients row named 'oauth-apps' (search only if absent).
+const clientNames = new Map<string, string>()
+async function oauthClientName(clientId: string) {
+  if (clientNames.has(clientId)) return clientNames.get(clientId)!
+  let name = `OAuth app ${clientId.slice(0, 8)}`
+  try {
+    const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    const res = await fetch(`${Deno.env.get('SUPABASE_URL')}/auth/v1/admin/oauth/clients/${clientId}`, {
+      headers: { apikey: key, Authorization: `Bearer ${key}` },
+    })
+    if (res.ok) {
+      const c = await res.json()
+      if (c?.client_name) name = `${c.client_name} (OAuth)`
+    }
+  } catch { /* keep the fallback name */ }
+  clientNames.set(clientId, name)
+  return name
+}
+
+function jwtClaims(token: string): Record<string, unknown> | null {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(atob(part + '='.repeat((4 - (part.length % 4)) % 4)))
+  } catch {
+    return null
+  }
+}
+
+async function identifyOAuth(token: string): Promise<McpClient | null> {
+  const claims = jwtClaims(token)
+  const clientId = typeof claims?.client_id === 'string' ? claims.client_id : ''
+  if (!clientId) return null
+  // getUser verifies the signature and expiry with Supabase itself
+  const { data, error } = await admin.auth.getUser(token)
+  if (error || !data.user || data.user.id !== OWNER_USER_ID) return null
+  const { data: row } = await admin
+    .from('mcp_clients').select('allowed_tools, active').eq('name', 'oauth-apps').maybeSingle()
+  if (row && !row.active) return null
+  const tools = ((row?.allowed_tools as string[] | undefined) ?? ['search_thoughts']).filter((t) => ALL_TOOLS.includes(t))
+  return { name: await oauthClientName(clientId), tools }
+}
+
 async function identifyClient(token: string): Promise<McpClient | null> {
   if (!token) return null
   if (safeEqual(token, MCP_ACCESS_KEY)) return { name: 'Claude Desktop (main key)', tools: ALL_TOOLS }
+  if (token.split('.').length === 3) return await identifyOAuth(token)
   const { data } = await admin
     .from('mcp_clients')
     .select('id, name, allowed_tools')
@@ -444,6 +491,27 @@ Deno.serve(async (req) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
 
+  // OAuth discovery (RFC 9728): tells apps like ChatGPT where to sign in
+  const resourceUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/open-brain-mcp`
+  const metadataUrl = `${resourceUrl}/.well-known/oauth-protected-resource`
+  if (req.method === 'GET' && new URL(req.url).pathname.endsWith('/.well-known/oauth-protected-resource')) {
+    return json({
+      resource: resourceUrl,
+      authorization_servers: [`${Deno.env.get('SUPABASE_URL')}/auth/v1`],
+      scopes_supported: ['openid', 'email', 'profile', 'offline_access'],
+      bearer_methods_supported: ['header'],
+      resource_name: "Ian's Open Brain",
+    })
+  }
+  const unauthorized = () => new Response(JSON.stringify({ error: 'Unauthorized' }), {
+    status: 401,
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+      'WWW-Authenticate': `Bearer resource_metadata="${metadataUrl}"`,
+    },
+  })
+
   // This server answers plain POST requests only (no streaming)
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: corsHeaders })
 
@@ -455,9 +523,10 @@ Deno.serve(async (req) => {
   const address = callerAddress(req)
   const client = await identifyClient(token)
   if (!client) {
-    // Alert at most once an hour per address
-    await securityAlert('mcp_bad_key', { address }, { dedupKey: address, windowMinutes: 60 })
-    return json({ error: 'Unauthorized' }, 401)
+    // No key at all = an app discovering how to sign in (normal). A wrong key
+    // or pass = alert, at most once an hour per address.
+    if (token) await securityAlert('mcp_bad_key', { address }, { dedupKey: address, windowMinutes: 60 })
+    return unauthorized()
   }
   // Right key from an address we haven't seen in 30 days (per app): tell you about it
   await securityAlert('mcp_new_address', { app: client.name, address }, {
